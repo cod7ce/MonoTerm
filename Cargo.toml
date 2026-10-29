@@ -1,0 +1,44 @@
+[package]
+name = "monoterm"
+version = "0.1.0"
+edition = "2024"
+publish = false
+repository = "https://github.com/cod7ce/MonoTerm"
+description = "A native macOS terminal built with GPUI and Ghostty"
+
+[workspace]
+resolver = "2"
+exclude = [
+  "vendor/gpui-ghostty",
+  "vendor/zed",
+  "vendor/herdr/herdr-client",
+  "vendor/herdr/herdr-protocol",
+]
+
+[features]
+live-herdr-tests = []
+
+[dependencies]
+gpui = { path = "vendor/zed/crates/gpui", features = ["runtime_shaders"] }
+gpui_ghostty_terminal = { path = "vendor/gpui-ghostty/crates/gpui_ghostty_terminal" }
+portable-pty = "0.9"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+unicode-segmentation = "1.12"
+image = { version = "0.25", default-features = false }
+herdr-client = { path = "vendor/herdr/herdr-client" }
+herdr-protocol = { path = "vendor/herdr/herdr-protocol" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+raw-window-handle = "0.6"
+objc = "0.2"
+libc = "0.2"
+
+[build-dependencies]
+cc = "1"
+
+[profile.dev]
+debug = 1
+
+[profile.dev.package.ghostty_vt_sys]
+opt-level = 2

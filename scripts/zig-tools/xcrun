@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "$*" == "--sdk macosx --show-sdk-path" && -n "${TERMINAL_ZIG_SDK:-}" ]]; then
+  printf '%s\n' "$TERMINAL_ZIG_SDK"
+else
+  exec /usr/bin/xcrun "$@"
+fi

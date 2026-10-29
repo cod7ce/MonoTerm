@@ -1,0 +1,4 @@
+# Unified patch context includes intentional single-space empty lines.
+patches/*.patch -whitespace
+# Preserve upstream notice formatting verbatim.
+vendor/herdr/** -whitespace

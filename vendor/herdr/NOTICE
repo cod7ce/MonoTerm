@@ -1,0 +1,130 @@
+MonoTerm vendoring provenance
+
+MonoTerm includes crates/herdr-client, crates/herdr-protocol, and adapted native
+UI source from
+https://github.com/penso/herdr-gpui at commit
+38ea4248d2c64879f02053b419bdd5386eebce10. The two crates are relocated beneath
+vendor/herdr/; adapted UI source lives in MonoTerm's src/ directory.
+Cargo manifests were adapted to resolve dependencies outside the original
+workspace. The library source and the upstream license/attribution text below
+are preserved. See README.md for the included scope and build notes, and
+herdr-protocol/NOTICE.md for the protocol's upstream Herdr provenance.
+
+src/herdr_chrome.rs adapts crates/herdr-gpui/src/titlebar/tabs.rs,
+titlebar/navigation.rs, tab_layout/classic.rs and tab_layout.rs from that
+revision. Changes adapt GPUI 0.2.2, shared MonoTerm preferences, daemon-only
+terminal tabs, bounded acknowledged-focus history, and MonoTerm's response
+fences. Copyright 2026 Fabien Penso, Apache License 2.0.
+
+src/herdr_sidebar.rs and src/herdr_sidebar_rows.rs adapt
+crates/herdr-gpui/src/sidebar/{row,cell,metrics,agents,layout,render}.rs,
+sidebar/layouts/herdr.rs and sidebar/render/agent_rows.rs from the same revision.
+Changes reduce the UI to daemon workspaces and agents, use MonoTerm's shared
+palette/font and GPUI text measurement, omit custom token/repository metadata,
+and wire navigation and creation through MonoTerm's connection fences.
+Copyright 2026 Fabien Penso, Apache License 2.0. The upstream Herdr attribution
+for shared status indicators and settings is retained below.
+
+The upstream NOTICE follows unchanged.
+
+Herdr UI
+Copyright 2026 Fabien Penso
+
+This product includes software developed as part of the Herdr UI project,
+licensed under the Apache License, Version 2.0. The full license text is in
+LICENSE at the root of this repository.
+
+Portions of crates/herdr-protocol are adapted from Herdr
+(https://github.com/herdrdev/herdr), also licensed under Apache-2.0. The
+adapted files, the upstream revision they came from, and the modifications
+made to them are recorded in crates/herdr-protocol/NOTICE.md. No upstream
+NOTICE file was present at the revision used.
+
+The native GitHub integration's Arbor references and attribution are recorded
+in crates/herdr-gpui/GITHUB-NOTICE.md.
+
+The shared settings schema, defaults, theme palettes, and status indicators in
+crates/herdr-gpui/src/herdr_settings.rs, src/herdr_settings/, and src/sidebar/agents.rs
+are adapted from Herdr (https://github.com/herdrdev/herdr), Apache-2.0,
+revision 8ac9542757292f7a8d42a2d532bc6a8a33c7ffce: src/config/{model,sound,theme}.rs,
+src/app/{state,mod}.rs, and src/client/shell.rs. Adaptations include native RGB
+palette projection, bounded parsing, conflict-aware atomic persistence, and
+GPUI indicator rendering. No upstream NOTICE file was present at that revision.
+
+The notification policy and bundled audio assets adapted or copied from Herdr
+are attributed in crates/herdr-gpui/SOUND-NOTICE.md (Apache-2.0).
+Specifically, assets/sounds/done.mp3 and assets/sounds/request.mp3 are unmodified
+copies from https://github.com/herdrdev/herdr at revision
+8ac9542757292f7a8d42a2d532bc6a8a33c7ffce. The sound configuration, notification
+validation/timing policy, and system-player selection are adapted from that
+revision, with bounded workers, native focus, and cancellation added. No upstream
+NOTICE or separate audio license was present; the root Apache-2.0 license applies.
+
+The application icons in assets/icons/herdr-ui-icon-clean.svg and
+herdr-icon-square-clean.svg, their PNG exports, Herdr.icns, and Herdr.car use a ram path
+adapted from Herdr's logo:
+https://github.com/herdrdev/herdr/blob/HEAD/assets/logo.svg
+The upstream artwork is licensed under Apache-2.0. This adaptation places the
+ram and terminal prompt on a simple ivory tile, with modified scaling,
+placement, and flat graphite coloring.
+The derived herdr-worktree-1024.png, herdr-square-worktree-1024.png,
+Herdr-worktree.icns, and Herdr-worktree.car use a red palette to
+identify development builds made from linked Git worktrees.
+The repository social preview images in assets/social-preview-light.svg,
+assets/social-preview-light-ui.svg, and assets/social-preview-dark.svg, and
+their PNG exports, embed the same adapted ram path alongside original layout,
+typography, and interface artwork.
+
+The built-in theme files in assets/themes/ are unmodified copies from
+iTerm2-Color-Schemes (https://github.com/mbadolato/iTerm2-Color-Schemes),
+Copyright (c) 2011 to Present Mark Badolato, MIT License; each theme's
+copyright belongs to its author. crates/herdr-gpui/THEMES-NOTICE.md has the
+revision and the full license text.
+
+The icons assets/icons/vscode.svg, error.svg, and pass.svg are Codicons,
+Copyright (c) Microsoft Corporation, from
+https://github.com/microsoft/vscode-codicons at revision
+6b53088f5c55bce7107fb579765364f59cd4ad5d, unchanged, and licensed under
+CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/legalcode);
+assets/icons/LICENSE-codicons has the details. Visual Studio Code and its icon
+are trademarks of Microsoft Corporation, which does not make or endorse this
+app.
+
+The sidebar agent icons in assets/icons named agent-pi.svg, agent-claude.svg,
+agent-codex.svg (OpenAI mark), agent-gemini.svg, agent-cursor.svg,
+agent-devin.svg, agent-agy.svg (Antigravity), agent-cline.svg,
+agent-mastracode.svg (Mastra), agent-opencode.svg, agent-copilot.svg,
+agent-kimi.svg, agent-kiro.svg, agent-amp.svg, agent-grok.svg,
+agent-hermes.svg (Hermes Agent), agent-kilo.svg (Kilo Code),
+agent-qodercli.svg (Qoder), agent-qwen.svg, and agent-muse.svg (Meta mark)
+are from
+https://github.com/lobehub/lobe-icons/tree/master/packages/static-svg/icons
+(the agents added later at revision 79b551cf26aab9ea4ac701fb807160950a5b860f,
+and agent-muse.svg at revision bcdb7c82792a854c2967f7328e11a30205ea584d);
+assets/icons/README.md lists the source file for each.
+SVG wrappers were simplified and dimensions set to 24px; paths are unchanged.
+Brand marks identify their respective products and remain their owners' trademarks.
+The lettermarks agent-omp.svg, agent-droid.svg, agent-letta.svg, and
+agent-maki.svg are original artwork, not those products' logos.
+
+MIT License
+
+Copyright (c) 2023 LobeHub
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

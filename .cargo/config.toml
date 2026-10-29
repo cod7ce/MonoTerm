@@ -1,0 +1,5 @@
+[env]
+ZIG = { value = "scripts/zig.sh", relative = true }
+
+[build]
+jobs = 8

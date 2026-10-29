@@ -1,0 +1,44 @@
+name: macOS checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: macos-15
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '14.0'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Verify host and bootstrap pinned sources
+        run: |
+          test "$(uname -m)" = arm64
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+          rustup default stable
+          bash scripts/bootstrap.sh
+      - name: Validate version and formatting
+        run: |
+          python3 -I scripts/version.py --release
+          cargo fmt --package monoterm -- --check
+      - name: Test application and terminal components
+        run: cargo test --locked -p monoterm -p ghostty_vt -p ghostty_vt_sys -p gpui_ghostty_terminal
+      - name: Check application and terminal components
+        run: cargo clippy --locked -p monoterm -p ghostty_vt -p ghostty_vt_sys -p gpui_ghostty_terminal --all-targets -- -D warnings
+      - name: Test updater lifecycle and signature verification
+        run: |
+          bash scripts/test-updater.sh
+          xcrun swift scripts/update-key.swift self-test
+      - name: Build and verify application bundle
+        run: bash scripts/build-app.sh
