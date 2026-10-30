@@ -2,14 +2,14 @@
 
 A native macOS terminal built with Rust, GPUI and Ghostty. Each local pane owns a real PTY; Ghostty handles terminal state and GPUI renders the terminal and application.
 
-**Current version: 0.1.0.** Apple Silicon, macOS 14 or later.
+**Current version: 0.1.1.** Apple Silicon, macOS 14 or later.
 
 ## Features
 
 - A compact native window with a resizable tab sidebar, recursive split panes and Zen mode.
 - Unicode text, ANSI styles, scrollback, mouse reporting and bracketed paste.
 - Copy on selection, Shift selection in mouse-reporting applications, and reusable copy feedback.
-- Ghostty 1.4 Kitty graphics: direct PNG/raw pixels, crops, relative placements, Unicode placeholders, layering, scrolling, animation and deletion.
+- Ghostty 1.4 Kitty graphics: direct PNG/raw pixels and local files, crops, relative placements, Unicode placeholders, layering, scrolling, animation and deletion.
 - Shared Light/Dark appearance, accent colors, transparency, native blur and font preferences.
 - English and Simplified Chinese interfaces.
 - An optional native Herdr client and companion shells that follow verified local agents.
@@ -86,7 +86,7 @@ The separate Herdr renderer currently does not display terminal graphics, suppor
 
 Ghostty's VT C API is provisional: keep the exact source pin and adapter together. GPUI uses runtime Metal shaders. Menlo is the default font; Nerd Font symbols use installed fallback families, which bootstrap does not install or bundle.
 
-Kitty supports direct image payloads; file, temporary-file and shared-memory transports are not enabled. Image snapshots and visible textures each have a 64 MiB cache budget, separate from decoder and upstream storage limits. This is not a process-wide memory cap.
+Kitty supports direct image payloads and local regular-file transport, including the default PNG path used by Snacks in Neovim. Temporary-file and shared-memory transports are not enabled. Snacks may still require ImageMagick for image metadata and format conversion. Image snapshots and visible textures each have a 64 MiB cache budget, separate from decoder and upstream storage limits. This is not a process-wide memory cap.
 
 ## Validation
 
@@ -101,6 +101,8 @@ xcrun swift scripts/update-key.swift self-test
 The Ghostty 1.4 baseline passed 202 application/component tests and a focused 37-check native graphics flow, with all 12 screenshots inspected. That flow covers image crops/layers/placements, Light appearance, resize, animation without PTY output, stop/delete, Chinese selection and Vim screen restoration. The opt-in real Neovim query test passed separately. Native updater fixtures cover manual-only policy, isolated-window disablement and cancellation/retry around actual AppKit termination; they do not establish a cross-version installation by themselves.
 
 The Version settings revision passed 118 application tests (one opt-in test ignored), strict application Clippy and formatting, eight isolated native updater scenarios, and a 22-check Settings flow. All seven Settings/terminal screenshots were inspected for English/Chinese rendering, Light/Dark contrast, minimum-width controls and retained terminal input. The release archive passed ZIP integrity, SHA256, bundled metadata, nested code-signature and Ed25519 verification. These checks do not establish a cross-version download/install/relaunch.
+
+The 0.1.1 release passed 207 application/component tests (one opt-in ignored), strict all-target Clippy, formatting, eight native updater scenarios and Ed25519 signature tests. Focused native checks passed for Neovim local-file images and input scrolling (15), the original-position translucent Zen indicator (25), and viewport cursor visibility (14); all corresponding screenshots were inspected. Option-key GUI behavior remains unverified.
 
 Native GUI checks require a logged-in, unlocked macOS desktop and Accessibility/Screen Recording access. Use separate test-owned windows and configurations. Never restart an existing user terminal as part of verification. Existing upstream Rust future-compatibility warnings may still appear.
 

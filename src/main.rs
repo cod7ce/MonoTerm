@@ -1772,12 +1772,10 @@ impl Render for TerminalApp {
                         .flex()
                         .items_center()
                         .rounded(px(8.0))
-                        .bg(rgb(p.panel))
-                        .border_1()
-                        .border_color(rgb(p.border))
+                        .bg(rgba((p.panel << 8) | 0x26))
                         .when(
                             self.follow_settings.enabled && self.follow_controller.is_pinned(),
-                            |e| e.cursor_pointer(),
+                            |element| ui::keyboard_control(element, p).cursor_pointer(),
                         )
                         .on_click(cx.listener(|root, _, window, cx| {
                             if root.follow_settings.enabled && root.follow_controller.is_pinned() {
