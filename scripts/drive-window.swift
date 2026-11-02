@@ -470,16 +470,32 @@ do {
             event.post(tap: .cghidEventTap)
             Thread.sleep(forTimeInterval: index == 0 ? 0.5 : 0.04)
         }
-    case "hover":
+    case "hover", "command-hover":
         guard arguments.count == 5, let x = Double(arguments[3]), let y = Double(arguments[4]) else { fail("hover requires screen x and y") }
         try activateTarget()
         let point = CGPoint(x: x, y: y)
         let target = try mouseTarget(at: point)
         guard CGWarpMouseCursorPosition(point) == .success else { fail("Cannot move the pointer") }
         guard try mouseTarget(at: point) == target else { fail("Target window changed during hover") }
-        mouseEvent(.mouseMoved, at: point).post(tap: .cghidEventTap)
+        let event = mouseEvent(.mouseMoved, at: point)
+        event.flags = command == "command-hover" ? .maskCommand : []
+        event.post(tap: .cghidEventTap)
         Thread.sleep(forTimeInterval: 0.1)
-    case "click", "right-click":
+    case "scroll":
+        guard arguments.count == 6, let x = Double(arguments[3]), let y = Double(arguments[4]),
+              let delta = Int32(arguments[5]), (-600...600).contains(delta) else { fail("scroll requires screen x y and a pixel delta within -600...600") }
+        try activateTarget()
+        let point = CGPoint(x: x, y: y)
+        let target = try mouseTarget(at: point)
+        guard CGWarpMouseCursorPosition(point) == .success else { fail("Cannot move the pointer") }
+        mouseEvent(.mouseMoved, at: point).post(tap: .cghidEventTap)
+        guard try mouseTarget(at: point) == target,
+              let event = CGEvent(scrollWheelEvent2Source: nil, units: .pixel,
+                                  wheelCount: 1, wheel1: delta, wheel2: 0, wheel3: 0) else { fail("Cannot scroll the target window") }
+        event.location = point
+        event.post(tap: .cghidEventTap)
+        Thread.sleep(forTimeInterval: 0.2)
+    case "click", "right-click", "command-click":
         guard arguments.count == 5, let x = Double(arguments[3]), let y = Double(arguments[4]) else { fail("click requires screen x and y") }
         try activateTarget()
         let point = CGPoint(x: x, y: y)
@@ -493,7 +509,9 @@ do {
         // AppKit needs the global mouse location and a click count to resolve GPUI hit targets.
         for type: CGEventType in [.mouseMoved, down, up] {
             guard try mouseTarget(at: point) == target else { throw NSError(domain: "WindowDriver", code: 7, userInfo: [NSLocalizedDescriptionKey: "Target window changed during click"]) }
-            mouseEvent(type, at: point).post(tap: .cghidEventTap)
+            let event = mouseEvent(type, at: point)
+            event.flags = command == "command-click" ? .maskCommand : []
+            event.post(tap: .cghidEventTap)
             if type == down { pressed = true }
             if type == up { pressed = false }
             Thread.sleep(forTimeInterval: 0.05)
@@ -502,7 +520,7 @@ do {
         guard (7...8).contains(arguments.count),
               let x1 = Double(arguments[3]), let y1 = Double(arguments[4]),
               let x2 = Double(arguments[5]), let y2 = Double(arguments[6]),
-              arguments.count == 7 || arguments[7] == "shift" else { fail("drag requires start x y and end x y, with optional shift") }
+              arguments.count == 7 || ["shift", "command"].contains(arguments[7]) else { fail("drag requires start x y and end x y, with optional shift or command") }
         try activateTarget()
         let captureCopy = command == "select-read"
         let pasteboard = NSPasteboard.general
@@ -529,7 +547,7 @@ do {
                 pasteboard.writeObjects(restored)
             }
         }
-        let dragFlags: CGEventFlags = arguments.count == 8 ? .maskShift : []
+        let dragFlags: CGEventFlags = arguments.count == 8 ? (arguments[7] == "command" ? .maskCommand : .maskShift) : []
         func dragEvent(_ type: CGEventType, at point: CGPoint) -> CGEvent {
             let event = mouseEvent(type, at: point)
             event.flags = dragFlags

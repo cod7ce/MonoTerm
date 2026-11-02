@@ -54,7 +54,6 @@ pub struct CompositionToken {
     target: InputTarget,
 }
 
-#[cfg(test)]
 impl InputToken {
     pub fn target(&self) -> &InputTarget {
         &self.target
@@ -161,6 +160,8 @@ pub enum WorkspaceAction<'a> {
 enum ShellMutation<'a> {
     CreateTab,
     CloseTab(&'a str),
+    SplitPane(&'a str, &'a str),
+    ClosePane(&'a str),
     CreateWorkspace,
     Workspace(&'a WorkspaceTarget, WorkspaceAction<'a>),
 }
@@ -244,6 +245,29 @@ impl ShellMutation<'_> {
                     return Err("Herdr tab workspace is no longer present".into());
                 }
                 Ok((Method::TabClose, json!({"tab_id": tab.tab_id})))
+            }
+            Self::SplitPane(id, _) | Self::ClosePane(id) => {
+                let pane = snapshot
+                    .panes
+                    .iter()
+                    .find(|pane| pane.pane_id == *id)
+                    .ok_or("Herdr pane is no longer present")?;
+                if snapshot.focused_pane_id.as_deref() != Some(*id)
+                    || snapshot.focused_tab_id.as_deref() != Some(pane.tab_id.as_str())
+                    || snapshot.focused_workspace_id.as_deref() != Some(pane.workspace_id.as_str())
+                {
+                    return Err("Herdr pane destination changed".into());
+                }
+                match self {
+                    Self::SplitPane(_, direction) if matches!(*direction, "right" | "down") => {
+                        Ok((
+                            Method::PaneSplit,
+                            json!({"target_pane_id": id, "direction": direction, "focus": true}),
+                        ))
+                    }
+                    Self::SplitPane(..) => Err("Unsupported pane split direction".into()),
+                    _ => Ok((Method::PaneClose, json!({"pane_id": id}))),
+                }
             }
             Self::CreateWorkspace => {
                 let mut params = json!({"focus": true});
@@ -657,6 +681,14 @@ impl HerdrConnection {
         self.mutate_shell(ShellMutation::CloseTab(tab_id))
     }
 
+    pub fn split_pane(&mut self, pane_id: &str, direction: &str) -> Result<(), String> {
+        self.mutate_shell(ShellMutation::SplitPane(pane_id, direction))
+    }
+
+    pub fn close_pane(&mut self, pane_id: &str) -> Result<(), String> {
+        self.mutate_shell(ShellMutation::ClosePane(pane_id))
+    }
+
     /// Create and focus a workspace, inheriting the captured source workspace's
     /// directory as upstream does. An empty daemon may create its first space.
     pub fn create_workspace(&mut self) -> Result<(), String> {
@@ -806,6 +838,8 @@ impl HerdrConnection {
         let status = match mutation {
             ShellMutation::CreateTab => "Creating tab",
             ShellMutation::CloseTab(_) => "Closing tab",
+            ShellMutation::SplitPane(..) => "Splitting pane",
+            ShellMutation::ClosePane(_) => "Closing pane",
             ShellMutation::CreateWorkspace => "Creating workspace",
             ShellMutation::Workspace(_, WorkspaceAction::NewTab) => "Creating tab",
             ShellMutation::Workspace(_, WorkspaceAction::Rename(_)) => "Renaming workspace",
@@ -989,10 +1023,17 @@ impl HerdrConnection {
     /// Start a fresh attempt at the same exact socket. Restores only focus,
     /// geometry and surface interest, never a pane navigation or input event.
     pub fn reconnect(&mut self) {
-        self.clear_connection();
+        self.disconnect();
         self.enabled = true;
         self.backoff = INITIAL_BACKOFF;
         self.start(Instant::now());
+    }
+
+    pub fn set_source(&mut self, json_socket: &str) -> Result<(), String> {
+        let socket = client_socket_path(json_socket)?;
+        self.socket = socket;
+        self.reconnect();
+        Ok(())
     }
 
     fn invalidate_input(&mut self) {
@@ -1465,6 +1506,19 @@ mod tests {
     }
 
     #[test]
+    fn invalid_source_preserves_the_live_connection_and_input_identity() {
+        let mut connection = ready();
+        let token = connection.projected_token();
+        let socket = connection.socket.clone();
+        let snapshot = connection.snapshot.clone();
+        assert!(connection.set_source("/").is_err());
+        assert_eq!(connection.socket, socket);
+        assert_eq!(connection.projected_token(), token);
+        assert_eq!(connection.snapshot, snapshot);
+        assert!(connection.surface.is_some());
+    }
+
+    #[test]
     fn shell_mutations_use_upstream_params_and_explicit_targets() {
         let mut snapshot = (*snapshot()).clone();
         assert_eq!(
@@ -1509,6 +1563,47 @@ mod tests {
             (Method::WorkspaceCreate, json!({"focus": true}))
         );
         assert!(ShellMutation::CreateTab.request(&snapshot).is_err());
+    }
+
+    #[test]
+    fn pane_mutations_capture_the_focused_pane_and_reject_stale_destinations() {
+        let mut snapshot = (*snapshot()).clone();
+        assert_eq!(
+            ShellMutation::SplitPane("w1:p1", "right")
+                .request(&snapshot)
+                .unwrap(),
+            (
+                Method::PaneSplit,
+                json!({"target_pane_id": "w1:p1", "direction": "right", "focus": true})
+            )
+        );
+        assert_eq!(
+            ShellMutation::ClosePane("w1:p1")
+                .request(&snapshot)
+                .unwrap(),
+            (Method::PaneClose, json!({"pane_id": "w1:p1"}))
+        );
+        assert!(
+            ShellMutation::SplitPane("w1:p1", "invalid")
+                .request(&snapshot)
+                .is_err()
+        );
+        assert!(
+            ShellMutation::ClosePane("missing")
+                .request(&snapshot)
+                .is_err()
+        );
+        snapshot.focused_pane_id = Some("w1:p2".into());
+        assert!(
+            ShellMutation::ClosePane("w1:p1")
+                .request(&snapshot)
+                .is_err()
+        );
+        assert!(
+            ShellMutation::SplitPane("w1:p1", "down")
+                .request(&snapshot)
+                .is_err()
+        );
     }
 
     #[test]
@@ -1646,6 +1741,11 @@ mod tests {
         for (mutation, method) in [
             (ShellMutation::CreateTab, Method::TabCreate),
             (ShellMutation::CloseTab("w1:t1"), Method::TabClose),
+            (
+                ShellMutation::SplitPane("w1:p1", "right"),
+                Method::PaneSplit,
+            ),
+            (ShellMutation::ClosePane("w1:p1"), Method::PaneClose),
             (ShellMutation::CreateWorkspace, Method::WorkspaceCreate),
         ] {
             let mut owner = ready();
@@ -1678,6 +1778,8 @@ mod tests {
         for mutation in [
             ShellMutation::CreateTab,
             ShellMutation::CloseTab("w1:t1"),
+            ShellMutation::SplitPane("w1:p1", "down"),
+            ShellMutation::ClosePane("w1:p1"),
             ShellMutation::CreateWorkspace,
         ] {
             let mut owner = ready();
@@ -1741,6 +1843,8 @@ mod tests {
         for mutation in [
             ShellMutation::CreateTab,
             ShellMutation::CloseTab("w1:t1"),
+            ShellMutation::SplitPane("w1:p1", "down"),
+            ShellMutation::ClosePane("w1:p1"),
             ShellMutation::CreateWorkspace,
         ] {
             let mut owner = ready();

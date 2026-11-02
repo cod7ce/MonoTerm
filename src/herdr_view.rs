@@ -11,8 +11,8 @@ use crate::{
 use gpui::{
     App, Bounds, Context, DispatchPhase, ElementInputHandler, Entity, EntityInputHandler,
     FocusHandle, Font, InputHandler, KeyDownEvent, Modifiers, MouseButton, Pixels, Point, Render,
-    Subscription, TextAlign, TextRun, UTF16Selection, Window, WindowHandle, canvas, div, fill,
-    point, prelude::*, px, rgb, size,
+    Subscription, TextAlign, TextRun, UTF16Selection, Window, canvas, div, fill, point, prelude::*,
+    px, rgb, size,
 };
 use herdr_protocol::{
     ClientKeyCode, ClientKeyKind, ClientMouseButton, ClientMouseGeometry, ClientMouseKind,
@@ -20,10 +20,14 @@ use herdr_protocol::{
 };
 use std::ops::Range;
 
+#[path = "herdr_actions.rs"]
+mod actions;
 #[path = "herdr_chrome.rs"]
 mod chrome;
 #[path = "herdr_indicators.rs"]
 mod indicators;
+#[path = "herdr_links.rs"]
+mod links;
 #[path = "herdr_sidebar.rs"]
 mod sidebar;
 #[path = "herdr_sidebar_menu.rs"]
@@ -47,7 +51,7 @@ enum SidebarDrag {
 
 pub(crate) struct HerdrWindow {
     connection: Entity<HerdrConnection>,
-    owner: WindowHandle<TerminalApp>,
+    owner: Entity<TerminalApp>,
     focus_handle: FocusHandle,
     font: Font,
     font_size: f32,
@@ -83,6 +87,7 @@ pub(crate) struct HerdrWindow {
     selection_dragged: bool,
     selection_rect: SurfaceRect,
     selection_token: Option<InputToken>,
+    links: links::LinkState,
     scroll_remainder: f32,
     error: Option<String>,
     trace: bool,
@@ -94,16 +99,18 @@ impl HerdrWindow {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         connection: Entity<HerdrConnection>,
-        owner: WindowHandle<TerminalApp>,
+        owner: Entity<TerminalApp>,
         font: Font,
         font_size: f32,
         palette: Palette,
         blur_radius: u32,
         language: Language,
+        preferences: crate::window_preferences::HerdrPreferences,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let observation = cx.observe(&connection, |view, _, cx| {
+            view.validate_links(cx);
             if view
                 .composition_token
                 .as_ref()
@@ -125,7 +132,10 @@ impl HerdrWindow {
         });
         let activation = cx.observe_window_activation(window, |view, window, cx| {
             if !window.is_window_active() {
-                view.sidebar_drag = None;
+                view.cancel_links();
+                if view.sidebar_drag.take().is_some() {
+                    view.save_layout(cx);
+                }
             }
             let result = view.connection.update(cx, |connection, cx| {
                 let result = connection.set_focus(window.is_window_active());
@@ -134,8 +144,17 @@ impl HerdrWindow {
             });
             view.record(result, cx);
         });
+        let appearance = cx.observe_window_appearance(window, |view, window, cx| {
+            view.owner
+                .update(cx, |root, cx| root.apply_appearance(window, cx, false));
+        });
         let close_connection = connection.clone();
+        let shared = owner.clone();
         window.on_window_should_close(cx, move |_, cx| {
+            shared.update(cx, |root, cx| {
+                root.herdr_window = None;
+                cx.notify();
+            });
             close_connection.update(cx, |connection, cx| {
                 if let Err(error) = connection.set_surface_active(false) {
                     eprintln!("Herdr detach: {error}");
@@ -158,17 +177,17 @@ impl HerdrWindow {
             toast: toast::new(window, palette, cx),
             blur_radius,
             language,
-            sidebar_visible: true,
-            sidebar_view: sidebar_menu::SidebarView::default(),
+            sidebar_visible: preferences.visible,
+            sidebar_view: preferences.view,
             sidebar_menu: None,
             sidebar_style: sidebar_style::SidebarStyle::load(),
-            sidebar_width: window_chrome::SIDEBAR_WIDTH,
-            sidebar_ratio: 0.5,
+            sidebar_width: preferences.width,
+            sidebar_ratio: preferences.ratio,
             sidebar_drag: None,
             workspace_menu: None,
             shell_corners: shell_surface::CornerCache::default(),
             sidebar_scroll: std::array::from_fn(|_| gpui::ScrollHandle::new()),
-            collapsed_repos: std::collections::HashSet::new(),
+            collapsed_repos: preferences.collapsed_repos,
             tab_scroll: gpui::ScrollHandle::new(),
             indicator_started: std::time::Instant::now(),
             indicator_elapsed: 0,
@@ -190,12 +209,18 @@ impl HerdrWindow {
                 height: 0,
             },
             selection_token: None,
+            links: links::LinkState::default(),
             scroll_remainder: 0.0,
             error: None,
             trace: std::env::var_os("MONOTERM_HERDR_TRACE").is_some(),
             input_started: None,
-            _subscriptions: vec![observation, activation],
+            _subscriptions: vec![observation, activation, appearance],
         };
+        view._subscriptions
+            .push(cx.on_blur(&view.focus_handle, window, |view, _, cx| {
+                view.cancel_links();
+                cx.notify();
+            }));
         view.apply_material(window, cx);
         view.focus(window, cx);
         view
@@ -226,6 +251,7 @@ impl HerdrWindow {
         cx: &mut Context<Self>,
     ) {
         if self.font != font || self.font_size != font_size {
+            self.cancel_links();
             self.glyph_cache.clear();
         }
         self.font = font;
@@ -238,11 +264,13 @@ impl HerdrWindow {
     }
 
     fn adjust_font(&mut self, delta: f32, cx: &mut Context<Self>) {
-        let owner = self.owner;
+        if self.link_menu_open() || !self.composition.is_empty() {
+            return;
+        }
+        self.cancel_links();
+        let owner = self.owner.clone();
         cx.defer(move |cx| {
-            if let Err(error) = owner.update(cx, |root, _, cx| root.adjust_font(delta, cx)) {
-                eprintln!("Herdr font: {error}");
-            }
+            owner.update(cx, |root, cx| root.adjust_font(delta, cx));
         });
     }
 
@@ -291,6 +319,15 @@ impl HerdrWindow {
         event: ClientPaneInputEvent,
         cx: &mut Context<Self>,
     ) {
+        if !matches!(
+            event,
+            ClientPaneInputEvent::Mouse {
+                kind: ClientMouseKind::Moved,
+                ..
+            }
+        ) {
+            self.cancel_links();
+        }
         if self.selection.take().is_some() {
             cx.notify();
         }
@@ -325,20 +362,18 @@ impl HerdrWindow {
         self.send_to(None, event, cx);
     }
 
-    fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let result = self.connection.update(cx, |connection, cx| {
-            let result = connection
-                .set_surface_active(false)
-                .and_then(|()| connection.set_focus(false));
-            cx.notify();
-            result
-        });
-        self.record(result, cx);
-        window.remove_window();
-    }
-
     fn key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.workspace_menu.is_some() || self.sidebar_menu.is_some() {
+            return;
+        }
         let key = &event.keystroke;
+        if self.link_menu_open() {
+            self.cancel_links();
+            cx.notify();
+            cx.stop_propagation();
+            return;
+        }
+        self.cancel_links();
         if !self.focus_handle.is_focused(window) {
             if key.key == "escape" && !key.modifiers.modified() {
                 self.focus_handle.focus(window, cx);
@@ -348,28 +383,8 @@ impl HerdrWindow {
             cx.stop_propagation();
             return;
         }
+        // Platform shortcuts dispatch through the same GPUI actions as menus.
         if key.modifiers.platform {
-            match key.key.as_str() {
-                "v" => {
-                    if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                        self.send(ClientPaneInputEvent::Paste(text), cx);
-                    }
-                }
-                "c" => self.copy(window, cx),
-                "w" => self.close(window, cx),
-                "," => {
-                    let owner = self.owner;
-                    cx.defer(move |cx| {
-                        if let Err(error) =
-                            owner.update(cx, |root, window, cx| root.open_settings(window, cx))
-                        {
-                            eprintln!("Herdr settings: {error}");
-                        }
-                    });
-                }
-                _ => return,
-            }
-            cx.stop_propagation();
             return;
         }
         if !self.composition.is_empty() || key.is_ime_in_progress() {
@@ -402,6 +417,9 @@ impl HerdrWindow {
         window: &Window,
         cx: &mut Context<Self>,
     ) {
+        if self.link_mouse(position, kind, modifiers, window, cx) {
+            return;
+        }
         if self.selecting {
             if !self.focus_handle.is_focused(window)
                 || self.selection_token.is_none()
@@ -553,8 +571,53 @@ impl HerdrWindow {
         );
     }
 
+    fn select_all(&mut self, window: &Window, cx: &mut Context<Self>) {
+        if !self.focus_handle.is_focused(window)
+            || !self.composition.is_empty()
+            || self.link_menu_open()
+            || self.sidebar_menu.is_some()
+            || self.workspace_menu.is_some()
+        {
+            return;
+        }
+        let connection = self.connection.read(cx);
+        let Some(token) = connection.input_token() else {
+            return;
+        };
+        let Some(surface) = &connection.surface else {
+            return;
+        };
+        let rect = if surface.popup.is_some() {
+            herdr_render::popup_rect(surface)
+        } else {
+            surface
+                .panes
+                .iter()
+                .find(|pane| pane.focused)
+                .map(|pane| pane.inner_rect)
+        };
+        let Some(rect) = rect.filter(|rect| rect.width > 0 && rect.height > 0) else {
+            return;
+        };
+        self.selection_rect = rect;
+        self.selection_token = Some(token);
+        self.selection = Some((
+            (rect.x, rect.y),
+            (rect.x + rect.width - 1, rect.y + rect.height - 1),
+        ));
+        self.selecting = false;
+        self.selection_dragged = false;
+        self.cancel_links();
+        cx.notify();
+    }
+
     fn copy(&self, window: &Window, cx: &mut Context<Self>) {
-        if !self.focus_handle.is_focused(window) {
+        if !self.focus_handle.is_focused(window)
+            || !self.composition.is_empty()
+            || self.link_menu_open()
+            || self.sidebar_menu.is_some()
+            || self.workspace_menu.is_some()
+        {
             return;
         }
         let Some((start, end)) = self.selection else {
@@ -596,9 +659,11 @@ impl HerdrWindow {
         let on_move = window.listener_for(
             &cx.entity(),
             |view, event: &gpui::MouseMoveEvent, window, cx| {
+                view.link_move(event, window, cx);
                 if let Some(drag) = view.sidebar_drag {
                     if event.pressed_button != Some(MouseButton::Left) {
                         view.sidebar_drag = None;
+                        view.save_layout(cx);
                     } else {
                         match drag {
                             SidebarDrag::Width => {
@@ -656,11 +721,12 @@ impl HerdrWindow {
             &cx.entity(),
             |view, event: &gpui::MouseUpEvent, window, cx| {
                 if view.sidebar_drag.take().is_some() {
+                    view.save_layout(cx);
                     cx.stop_propagation();
                     cx.notify();
                     return;
                 }
-                if view.selecting {
+                if view.selecting || view.links.press.is_some() {
                     if let Some(button) = mouse_button(event.button) {
                         view.mouse(
                             event.position,
@@ -683,6 +749,9 @@ impl HerdrWindow {
             }
         });
         let started = self.trace.then(std::time::Instant::now);
+        if self.bounds != bounds {
+            self.cancel_links();
+        }
         self.bounds = bounds;
         let font_id = window.text_system().resolve_font(&self.font);
         let width = window
@@ -801,6 +870,7 @@ impl HerdrWindow {
                 }
             }
         }
+        self.paint_link(window);
         if !self.composition.is_empty() {
             let origin = self.cursor_bounds().origin;
             let run = TextRun {
@@ -847,6 +917,12 @@ impl HerdrWindow {
 
 impl Render for HerdrWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let shared = self.owner.read(cx);
+        let palette = shared.appearance.palette(TerminalApp::system_dark(window));
+        if self.palette != palette {
+            self.palette = palette;
+            self.apply_material(window, cx);
+        }
         self.update_workspace_dialog(window, cx);
         let reduced_motion = crate::window_style::reduced_motion();
         self.indicator_elapsed = if reduced_motion {
@@ -903,8 +979,8 @@ impl Render for HerdrWindow {
             f32::from(viewport.width),
             window.scale_factor(),
         );
-        if !show_sidebar {
-            self.sidebar_drag = None;
+        if !show_sidebar && self.sidebar_drag.take().is_some() {
+            self.save_layout(cx);
         }
         let shell_left = if show_sidebar {
             sidebar_width
@@ -920,6 +996,8 @@ impl Render for HerdrWindow {
         });
         let workspace_menu = self.render_workspace_menu(window, cx);
         let sidebar_menu = self.render_sidebar_menu(window, cx);
+        let link_menu = self.render_link_menu(window, cx);
+        let link_tooltip = self.link_tooltip();
         let background = shell_surface::background(
             &mut self.shell_corners,
             p,
@@ -939,6 +1017,17 @@ impl Render for HerdrWindow {
             .tab_group()
             .tab_stop(false)
             .track_focus(&self.focus_handle)
+            .key_context("Terminal HerdrTerminal")
+            .on_modifiers_changed(cx.listener(
+                |view, event: &gpui::ModifiersChangedEvent, window, cx| {
+                    if !gpui_ghostty_terminal::view::links::command_link(event.modifiers)
+                        && let Some(press) = &mut view.links.press
+                    {
+                        press.cancel();
+                    }
+                    view.link_hover(window.mouse_position(), event.modifiers, window, cx);
+                },
+            ))
             .on_key_down(cx.listener(Self::key_down))
             .on_action(cx.listener(|view, _: &ui::FocusControls, window, cx| {
                 view.focus_handle.focus(window, cx);
@@ -952,47 +1041,62 @@ impl Render for HerdrWindow {
                 cx.listener(|view, _: &crate::DecreaseFont, _, cx| view.adjust_font(-1.0, cx)),
             )
             .on_action(cx.listener(|view, _: &crate::ResetFont, _, cx| {
-                view.adjust_font(15.0 - view.font_size, cx)
+                view.adjust_font(crate::typography::DEFAULT_FONT_SIZE - view.font_size, cx)
             }))
-            .on_action(cx.listener(|view, _: &crate::ToggleSidebar, _, cx| view.toggle_sidebar(cx)))
-            .on_action(cx.listener(|view, _: &crate::NewSession, _, cx| {
-                let owner = view.owner;
-                cx.defer(move |cx| {
-                    if let Err(error) = owner.update(cx, |root, window, cx| {
-                        root.new_session(window, cx);
-                        window.activate_window();
-                    }) {
-                        eprintln!("Herdr new terminal: {error}");
-                    }
-                });
+            .on_action(cx.listener(|view, _: &crate::ToggleSidebar, _, cx| {
+                if !view.link_menu_open() {
+                    view.cancel_links();
+                    view.toggle_sidebar(cx);
+                }
             }))
-            .on_action(cx.listener(|view, _: &crate::ReturnLocal, _, cx| {
-                let owner = view.owner;
-                cx.defer(move |cx| {
-                    if let Err(error) =
-                        owner.update(cx, |root, window, cx| root.return_local(window, cx))
-                    {
-                        eprintln!("Herdr local terminals: {error}");
-                    }
-                });
-            }))
-            .on_action(cx.listener(|view, _: &crate::ToggleSettings, _, cx| {
-                let owner = view.owner;
-                cx.defer(move |cx| {
-                    if let Err(error) =
-                        owner.update(cx, |root, window, cx| root.open_settings(window, cx))
-                    {
-                        eprintln!("Herdr settings: {error}");
-                    }
-                });
+            .on_action(cx.listener(|view, _: &crate::NewSession, _, cx| view.new_tab(cx)))
+            .on_action(cx.listener(|view, _: &crate::NextSession, _, cx| view.cycle_tab(true, cx)))
+            .on_action(
+                cx.listener(|view, _: &crate::PreviousSession, _, cx| view.cycle_tab(false, cx)),
+            )
+            .on_action(cx.listener(|view, _: &crate::NextPane, _, cx| view.cycle_pane(true, cx)))
+            .on_action(
+                cx.listener(|view, _: &crate::PreviousPane, _, cx| view.cycle_pane(false, cx)),
+            )
+            .on_action(cx.listener(|view, _: &crate::NextAgent, _, cx| view.cycle_agent(true, cx)))
+            .on_action(
+                cx.listener(|view, _: &crate::PreviousAgent, _, cx| view.cycle_agent(false, cx)),
+            )
+            .on_action(cx.listener(|view, action: &crate::SelectTab, _, cx| {
+                view.select_tab(action.index, cx)
             }))
             .on_action(
-                cx.listener(|view, _: &crate::CloseSession, window, cx| view.close(window, cx)),
+                cx.listener(|view, _: &crate::SplitRight, _, cx| view.split_pane("right", cx)),
             )
-            .on_action(cx.listener(|view, _: &crate::CloseTab, window, cx| view.close(window, cx)))
+            .on_action(cx.listener(|view, _: &crate::SplitDown, _, cx| view.split_pane("down", cx)))
+            .on_action(cx.listener(|view, _: &crate::ReturnLocal, _, cx| {
+                if view.link_menu_open() || !view.composition.is_empty() {
+                    return;
+                }
+                view.cancel_links();
+                TerminalApp::show_main(view.owner.clone(), cx);
+            }))
+            .on_action(cx.listener(|view, _: &crate::ToggleSettings, window, cx| {
+                if view.link_menu_open() || !view.composition.is_empty() {
+                    return;
+                }
+                view.cancel_links();
+                view.owner
+                    .update(cx, |root, cx| root.open_settings(window, cx));
+            }))
+            .on_action(cx.listener(|view, _: &crate::CloseSession, _, cx| view.close_pane(cx)))
+            .on_action(cx.listener(|view, _: &crate::CloseTab, _, cx| view.close_tab(cx)))
+            .on_action(cx.listener(
+                |view, _: &gpui_ghostty_terminal::view::SelectAll, window, cx| {
+                    view.select_all(window, cx);
+                    cx.stop_propagation();
+                },
+            ))
             .on_action(
                 cx.listener(|view, _: &gpui_ghostty_terminal::view::Paste, window, cx| {
                     if view.focus_handle.is_focused(window)
+                        && !view.link_menu_open()
+                        && view.composition.is_empty()
                         && let Some(text) = cx.read_from_clipboard().and_then(|item| item.text())
                     {
                         view.send(ClientPaneInputEvent::Paste(text), cx);
@@ -1027,6 +1131,7 @@ impl Render for HerdrWindow {
                     .child(
                         div()
                             .id("herdr-terminal")
+                            .when(link_tooltip.is_some(), |terminal| terminal.cursor_pointer())
                             .flex_1()
                             .min_h_0()
                             .min_w_0()
@@ -1039,6 +1144,9 @@ impl Render for HerdrWindow {
                             .on_any_mouse_down(cx.listener(
                                 |view, event: &gpui::MouseDownEvent, window, cx| {
                                     view.focus_handle.focus(window, cx);
+                                    if event.first_mouse {
+                                        return;
+                                    }
                                     if let Some(button) = mouse_button(event.button) {
                                         view.mouse(
                                             event.position,
@@ -1087,6 +1195,7 @@ impl Render for HerdrWindow {
                             })
                             .on_scroll_wheel(cx.listener(
                                 |view, event: &gpui::ScrollWheelEvent, window, cx| {
+                                    view.cancel_links();
                                     view.scroll_remainder +=
                                         f32::from(event.delta.pixel_delta(view.cell.height).y)
                                             / f32::from(view.cell.height);
@@ -1153,6 +1262,8 @@ impl Render for HerdrWindow {
             )
             .children(workspace_menu)
             .children(sidebar_menu)
+            .children(link_menu)
+            .children(link_tooltip)
     }
 }
 
@@ -1316,6 +1427,7 @@ impl EntityInputHandler for HerdrWindow {
                 return;
             }
         }
+        self.cancel_links();
         self.composition = text.into();
         let end = text.encode_utf16().count();
         self.composition_selection = selected.unwrap_or(end..end);

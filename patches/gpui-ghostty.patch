@@ -1922,16 +1922,17 @@ index 1ea7090..0000000
 -    return i;
 -}
 diff --git a/crates/gpui_ghostty_terminal/Cargo.toml b/crates/gpui_ghostty_terminal/Cargo.toml
-index cbd24d6..35a4d87 100644
+index cbd24d6..30bcf89 100644
 --- a/crates/gpui_ghostty_terminal/Cargo.toml
 +++ b/crates/gpui_ghostty_terminal/Cargo.toml
-@@ -9,5 +9,6 @@ license = "Apache-2.0"
+@@ -9,5 +9,7 @@ license = "Apache-2.0"
  base64 = "0.22"
  ghostty_vt = { path = "../ghostty_vt" }
  gpui = { workspace = true }
 +image = { version = "0.25", default-features = false }
  smallvec = { workspace = true }
  unicode-width = "0.2"
++url = "2"
 diff --git a/crates/gpui_ghostty_terminal/src/session.rs b/crates/gpui_ghostty_terminal/src/session.rs
 index 78ebafb..55abccc 100644
 --- a/crates/gpui_ghostty_terminal/src/session.rs
@@ -2813,7 +2814,7 @@ index 9338d63..b47d2f7 100644
 +    assert_eq!(session.take_clipboard_write().as_deref(), Some("hi"));
 +}
 diff --git a/crates/gpui_ghostty_terminal/src/view/mod.rs b/crates/gpui_ghostty_terminal/src/view/mod.rs
-index 6d680bc..3e18151 100644
+index 6d680bc..a81dda4 100644
 --- a/crates/gpui_ghostty_terminal/src/view/mod.rs
 +++ b/crates/gpui_ghostty_terminal/src/view/mod.rs
 @@ -1,5 +1,5 @@
@@ -2823,13 +2824,15 @@ index 6d680bc..3e18151 100644
  use gpui::{
      App, Bounds, ClipboardItem, Context, Element, ElementId, ElementInputHandler,
      EntityInputHandler, FocusHandle, GlobalElementId, IntoElement, KeyBinding, KeyDownEvent,
-@@ -9,9 +9,95 @@ use gpui::{
+@@ -9,9 +9,97 @@ use gpui::{
  };
  use std::ops::Range;
  use std::sync::Once;
 +use std::time::Instant;
 +
 +mod images;
++pub mod links;
++mod terminal_links;
 +use images::{ImageCache, ImageDraw};
  
  actions!(terminal_view, [Copy, Paste, SelectAll, Tab, TabPrev]);
@@ -2919,7 +2922,95 @@ index 6d680bc..3e18151 100644
  const KEY_CONTEXT: &str = "Terminal";
  static KEY_BINDINGS: Once = Once::new();
  
-@@ -207,6 +293,8 @@ impl TerminalInput {
+@@ -108,87 +196,6 @@ pub(crate) fn sgr_mouse_sequence(button_value: u8, col: u16, row: u16, pressed:
+     format!("\x1b[<{};{};{}{}", button_value, col, row, suffix)
+ }
+ 
+-fn is_url_byte(b: u8) -> bool {
+-    matches!(b, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9')
+-        || matches!(
+-            b,
+-            b'-' | b'.'
+-                | b'_'
+-                | b'~'
+-                | b':'
+-                | b'/'
+-                | b'?'
+-                | b'#'
+-                | b'['
+-                | b']'
+-                | b'@'
+-                | b'!'
+-                | b'$'
+-                | b'&'
+-                | b'\''
+-                | b'('
+-                | b')'
+-                | b'*'
+-                | b'+'
+-                | b','
+-                | b';'
+-                | b'='
+-                | b'%'
+-        )
+-}
+-
+-fn url_at_byte_index(text: &str, index: usize) -> Option<String> {
+-    let bytes = text.as_bytes();
+-    if bytes.is_empty() {
+-        return None;
+-    }
+-
+-    let mut idx = index.min(bytes.len().saturating_sub(1));
+-
+-    if !is_url_byte(bytes[idx]) && idx > 0 && is_url_byte(bytes[idx - 1]) {
+-        idx -= 1;
+-    }
+-
+-    if !is_url_byte(bytes[idx]) {
+-        return None;
+-    }
+-
+-    let mut start = idx;
+-    while start > 0 && is_url_byte(bytes[start - 1]) {
+-        start -= 1;
+-    }
+-
+-    let mut end = idx + 1;
+-    while end < bytes.len() && is_url_byte(bytes[end]) {
+-        end += 1;
+-    }
+-
+-    while end > start
+-        && matches!(
+-            bytes[end - 1],
+-            b'.' | b',' | b')' | b']' | b'}' | b';' | b':' | b'!' | b'?'
+-        )
+-    {
+-        end -= 1;
+-    }
+-
+-    let candidate = std::str::from_utf8(&bytes[start..end]).ok()?;
+-    if candidate.starts_with("https://") || candidate.starts_with("http://") {
+-        Some(candidate.to_string())
+-    } else {
+-        None
+-    }
+-}
+-
+-fn url_at_column_in_line(line: &str, col: u16) -> Option<String> {
+-    if line.is_empty() {
+-        return None;
+-    }
+-
+-    let local = byte_index_for_column_in_line(line, col).min(line.len().saturating_sub(1));
+-    url_at_byte_index(line, local)
+-}
+-
+ type TerminalSendFn = dyn Fn(&[u8]) + Send + Sync + 'static;
+ 
+ pub struct TerminalInput {
+@@ -207,6 +214,8 @@ impl TerminalInput {
      }
  }
  
@@ -2928,7 +3019,7 @@ index 6d680bc..3e18151 100644
  pub struct TerminalView {
      session: TerminalSession,
      appearance: TerminalAppearance,
-@@ -214,15 +302,25 @@ pub struct TerminalView {
+@@ -214,15 +223,28 @@ pub struct TerminalView {
      viewport_line_offsets: Vec<usize>,
      viewport_total_len: usize,
      viewport_style_runs: Vec<Vec<StyleRun>>,
@@ -2951,10 +3042,13 @@ index 6d680bc..3e18151 100644
 +    selecting: bool,
 +    copy_on_select: bool,
 +    on_copied: Option<CopyCallback>,
++    link_press: Option<links::LinkPress<links::Link>>,
++    hovered_link: Option<links::Link>,
++    link_menu: Option<(gpui::Point<Pixels>, links::Link)>,
      marked_text: Option<SharedString>,
      marked_selected_range_utf16: Range<usize>,
      font: gpui::Font,
-@@ -258,15 +356,25 @@ impl TerminalView {
+@@ -258,15 +280,28 @@ impl TerminalView {
              viewport_line_offsets: Vec::new(),
              viewport_total_len: 0,
              viewport_style_runs: Vec::new(),
@@ -2977,10 +3071,13 @@ index 6d680bc..3e18151 100644
 +            selecting: false,
 +            copy_on_select: false,
 +            on_copied: None,
++            link_press: None,
++            hovered_link: None,
++            link_menu: None,
              marked_text: None,
              marked_selected_range_utf16: 0..0,
              font: crate::default_terminal_font(),
-@@ -274,6 +382,16 @@ impl TerminalView {
+@@ -274,6 +309,16 @@ impl TerminalView {
          .with_refreshed_viewport()
      }
  
@@ -2997,7 +3094,17 @@ index 6d680bc..3e18151 100644
      fn on_tab(&mut self, _: &Tab, _window: &mut Window, cx: &mut Context<Self>) {
          self.send_tab(false, cx);
      }
-@@ -307,15 +425,25 @@ impl TerminalView {
+@@ -283,6 +328,9 @@ impl TerminalView {
+     }
+ 
+     fn send_tab(&mut self, reverse: bool, cx: &mut Context<Self>) {
++        if self.link_menu_open() || self.is_composing() {
++            return;
++        }
+         if reverse {
+             self.send_input_parts(&[b"\x1b[Z"], cx);
+         } else {
+@@ -307,15 +355,28 @@ impl TerminalView {
              viewport_line_offsets: Vec::new(),
              viewport_total_len: 0,
              viewport_style_runs: Vec::new(),
@@ -3020,10 +3127,13 @@ index 6d680bc..3e18151 100644
 +            selecting: false,
 +            copy_on_select: false,
 +            on_copied: None,
++            link_press: None,
++            hovered_link: None,
++            link_menu: None,
              marked_text: None,
              marked_selected_range_utf16: 0..0,
              font: crate::default_terminal_font(),
-@@ -330,9 +458,24 @@ impl TerminalView {
+@@ -330,9 +391,24 @@ impl TerminalView {
      /// preserved. The view must be hosted over a transparent parent/window to
      /// expose content behind the window.
      ///
@@ -3050,15 +3160,16 @@ index 6d680bc..3e18151 100644
      pub fn set_appearance(
          &mut self,
          foreground: [u8; 3],
-@@ -435,6 +578,7 @@ impl TerminalView {
+@@ -435,6 +511,8 @@ impl TerminalView {
              return;
          }
  
++        self.cancel_link_interaction();
 +        self.scroll_to_input(cx);
          let total_utf16 = Self::utf16_len(&text);
          let selected = selected_range_utf16.unwrap_or(total_utf16..total_utf16);
          let selected = selected.start.min(total_utf16)..selected.end.min(total_utf16);
-@@ -452,11 +596,19 @@ impl TerminalView {
+@@ -452,11 +530,20 @@ impl TerminalView {
          self.send_input_parts(&[text.as_bytes()], cx);
      }
  
@@ -3075,11 +3186,20 @@ index 6d680bc..3e18151 100644
              return;
          }
  
++        self.cancel_link_interaction();
 +        self.scroll_to_input(cx);
          if let Some(input) = self.input.as_ref() {
              for bytes in parts {
                  input.send(bytes);
-@@ -490,12 +642,16 @@ impl TerminalView {
+@@ -472,6 +559,7 @@ impl TerminalView {
+     }
+ 
+     fn feed_output_bytes_to_session(&mut self, bytes: &[u8]) {
++        self.cancel_link_interaction();
+         if let Some(input) = self.input.as_ref() {
+             let _ = self
+                 .session
+@@ -490,12 +578,16 @@ impl TerminalView {
              return;
          }
  
@@ -3097,7 +3217,7 @@ index 6d680bc..3e18151 100644
              self.refresh_viewport();
              return;
          }
-@@ -514,6 +670,7 @@ impl TerminalView {
+@@ -514,6 +606,7 @@ impl TerminalView {
          if delta > 0 {
              self.viewport_lines.rotate_left(delta_abs);
              self.viewport_style_runs.rotate_left(delta_abs);
@@ -3105,7 +3225,7 @@ index 6d680bc..3e18151 100644
              if has_layouts {
                  self.line_layouts.rotate_left(delta_abs);
              }
-@@ -521,6 +678,7 @@ impl TerminalView {
+@@ -521,6 +614,7 @@ impl TerminalView {
              for idx in rows - delta_abs..rows {
                  self.viewport_lines[idx].clear();
                  self.viewport_style_runs[idx].clear();
@@ -3113,7 +3233,7 @@ index 6d680bc..3e18151 100644
                  if has_layouts {
                      self.line_layouts[idx] = None;
                  }
-@@ -533,6 +691,7 @@ impl TerminalView {
+@@ -533,6 +627,7 @@ impl TerminalView {
  
          self.viewport_lines.rotate_right(delta_abs);
          self.viewport_style_runs.rotate_right(delta_abs);
@@ -3121,7 +3241,7 @@ index 6d680bc..3e18151 100644
          if has_layouts {
              self.line_layouts.rotate_right(delta_abs);
          }
-@@ -540,6 +699,7 @@ impl TerminalView {
+@@ -540,6 +635,7 @@ impl TerminalView {
          for idx in 0..delta_abs {
              self.viewport_lines[idx].clear();
              self.viewport_style_runs[idx].clear();
@@ -3129,7 +3249,7 @@ index 6d680bc..3e18151 100644
              if has_layouts {
                  self.line_layouts[idx] = None;
              }
-@@ -549,9 +709,43 @@ impl TerminalView {
+@@ -549,9 +645,43 @@ impl TerminalView {
          let _ = self.apply_dirty_viewport_rows(&dirty_rows);
      }
  
@@ -3173,7 +3293,12 @@ index 6d680bc..3e18151 100644
  
          let dirty = self.session.take_dirty_viewport_rows();
          if !dirty.is_empty() && !self.apply_dirty_viewport_rows(&dirty) {
-@@ -569,6 +763,13 @@ impl TerminalView {
+@@ -565,10 +695,18 @@ impl TerminalView {
+     }
+ 
+     fn refresh_viewport(&mut self) {
++        self.cancel_link_interaction();
+         let viewport = self.session.dump_viewport().unwrap_or_default();
          self.viewport_lines = split_viewport_lines(&viewport);
          self.viewport_line_offsets = Self::compute_viewport_line_offsets(&self.viewport_lines);
          self.viewport_total_len = Self::compute_viewport_total_len(&self.viewport_lines);
@@ -3187,7 +3312,35 @@ index 6d680bc..3e18151 100644
          self.viewport_style_runs = (0..self.session.rows())
              .map(|row| {
                  self.session
-@@ -671,11 +872,14 @@ impl TerminalView {
+@@ -640,27 +778,6 @@ impl TerminalView {
+         out
+     }
+ 
+-    fn url_at_viewport_index(&self, index: usize) -> Option<String> {
+-        if self.viewport_lines.is_empty() {
+-            return None;
+-        }
+-
+-        let idx = index.min(self.viewport_total_len.saturating_sub(1));
+-        let row = self
+-            .viewport_line_offsets
+-            .iter()
+-            .enumerate()
+-            .rfind(|(_, offset)| **offset <= idx)
+-            .map(|(i, _)| i)?;
+-
+-        let line = self.viewport_lines.get(row)?.as_str();
+-        let line_start = *self.viewport_line_offsets.get(row).unwrap_or(&0);
+-        let local = idx
+-            .saturating_sub(line_start)
+-            .min(line.len().saturating_sub(1));
+-        url_at_byte_index(line, local)
+-    }
+-
+     fn apply_dirty_viewport_rows(&mut self, dirty_rows: &[u16]) -> bool {
+         if dirty_rows.is_empty() {
+             return false;
+@@ -671,11 +788,14 @@ impl TerminalView {
              self.refresh_viewport();
              return true;
          }
@@ -3203,7 +3356,7 @@ index 6d680bc..3e18151 100644
          for &row in dirty_rows {
              let row = row as usize;
              if row >= self.viewport_lines.len() {
-@@ -690,21 +894,39 @@ impl TerminalView {
+@@ -690,25 +810,44 @@ impl TerminalView {
                  }
              };
  
@@ -3251,7 +3404,12 @@ index 6d680bc..3e18151 100644
          true
      }
  
-@@ -721,7 +943,8 @@ impl TerminalView {
+     fn schedule_viewport_refresh(&mut self, cx: &mut Context<Self>) {
++        self.cancel_link_interaction();
+         self.pending_refresh = true;
+         cx.notify();
+     }
+@@ -721,7 +860,8 @@ impl TerminalView {
  
      pub fn feed_output_bytes(&mut self, bytes: &[u8], cx: &mut Context<Self>) {
          self.feed_output_bytes_to_session(bytes);
@@ -3261,7 +3419,7 @@ index 6d680bc..3e18151 100644
          self.apply_side_effects(cx);
          cx.notify();
      }
-@@ -739,6 +962,7 @@ impl TerminalView {
+@@ -739,6 +879,7 @@ impl TerminalView {
              let pending = std::mem::take(&mut self.pending_output);
              self.feed_output_bytes_to_session(&pending);
              self.apply_side_effects(cx);
@@ -3269,7 +3427,7 @@ index 6d680bc..3e18151 100644
              self.reconcile_dirty_viewport_after_output();
          }
  
-@@ -750,6 +974,7 @@ impl TerminalView {
+@@ -750,6 +891,7 @@ impl TerminalView {
                  offset = end;
              }
              self.apply_side_effects(cx);
@@ -3277,7 +3435,17 @@ index 6d680bc..3e18151 100644
              self.reconcile_dirty_viewport_after_output();
              cx.notify();
              return;
-@@ -778,19 +1003,32 @@ impl TerminalView {
+@@ -767,6 +909,9 @@ impl TerminalView {
+     }
+ 
+     fn on_paste(&mut self, _: &Paste, _window: &mut Window, cx: &mut Context<Self>) {
++        if self.link_menu_open() || self.is_composing() {
++            return;
++        }
+         let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
+             return;
+         };
+@@ -778,22 +923,41 @@ impl TerminalView {
          }
      }
  
@@ -3310,6 +3478,9 @@ index 6d680bc..3e18151 100644
 +    }
 +
 +    fn on_copy(&mut self, _: &Copy, window: &mut Window, cx: &mut Context<Self>) {
++        if self.link_menu_open() || self.is_composing() {
++            return;
++        }
 +        let text = self
 +            .selected_text()
 +            .unwrap_or_else(|| self.viewport_slice(0..self.viewport_total_len));
@@ -3317,7 +3488,13 @@ index 6d680bc..3e18151 100644
      }
  
      fn on_select_all(&mut self, _: &SelectAll, window: &mut Window, cx: &mut Context<Self>) {
-@@ -809,6 +1047,9 @@ impl TerminalView {
++        if self.link_menu_open() || self.is_composing() {
++            return;
++        }
+         self.selection = Some(ByteSelection {
+             anchor: 0,
+             active: self.viewport_total_len,
+@@ -809,41 +973,17 @@ impl TerminalView {
          cx: &mut Context<Self>,
      ) {
          self.focus_handle.focus(window, cx);
@@ -3326,43 +3503,46 @@ index 6d680bc..3e18151 100644
 +        }
  
          if event.first_mouse {
++            self.cancel_link_interaction();
              return;
-@@ -817,20 +1058,14 @@ impl TerminalView {
-         if event.button == MouseButton::Left && event.modifiers.platform {
-             if let Some((col, row)) = self.mouse_position_to_cell(event.position, window) {
-                 if let Some(link) = self.session.hyperlink_at(col, row) {
+         }
+ 
+-        if event.button == MouseButton::Left && event.modifiers.platform {
+-            if let Some((col, row)) = self.mouse_position_to_cell(event.position, window) {
+-                if let Some(link) = self.session.hyperlink_at(col, row) {
 -                    let item = ClipboardItem::new_string(link);
 -                    cx.write_to_clipboard(item.clone());
 -                    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 -                    cx.write_to_primary(item);
-+                    self.copy_text(link, window, cx);
-                     return;
-                 }
- 
-                 if let Some(line) = self.viewport_lines.get(row.saturating_sub(1) as usize)
-                     && let Some(url) = url_at_column_in_line(line, col)
-                 {
+-                    return;
+-                }
+-
+-                if let Some(line) = self.viewport_lines.get(row.saturating_sub(1) as usize)
+-                    && let Some(url) = url_at_column_in_line(line, col)
+-                {
 -                    let item = ClipboardItem::new_string(url);
 -                    cx.write_to_clipboard(item.clone());
 -                    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 -                    cx.write_to_primary(item);
-+                    self.copy_text(url, window, cx);
-                     return;
-                 }
-             }
-@@ -838,10 +1073,7 @@ impl TerminalView {
-             if let Some(index) = self.mouse_position_to_viewport_index(event.position, window)
-                 && let Some(url) = self.url_at_viewport_index(index)
-             {
+-                    return;
+-                }
+-            }
+-
+-            if let Some(index) = self.mouse_position_to_viewport_index(event.position, window)
+-                && let Some(url) = self.url_at_viewport_index(index)
+-            {
 -                let item = ClipboardItem::new_string(url);
 -                cx.write_to_clipboard(item.clone());
 -                #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 -                cx.write_to_primary(item);
-+                self.copy_text(url, window, cx);
-                 return;
-             }
+-                return;
+-            }
++        if self.link_mouse_down(event, window, cx) {
++            return;
          }
-@@ -858,6 +1090,7 @@ impl TerminalView {
+ 
+         if event.modifiers.shift
+@@ -858,6 +998,7 @@ impl TerminalView {
                      anchor: index,
                      active: index,
                  });
@@ -3370,10 +3550,13 @@ index 6d680bc..3e18151 100644
                  cx.notify();
              }
              return;
-@@ -888,17 +1121,30 @@ impl TerminalView {
+@@ -888,17 +1029,33 @@ impl TerminalView {
      }
  
      fn on_mouse_up(&mut self, event: &MouseUpEvent, window: &mut Window, cx: &mut Context<Self>) {
++        if self.link_mouse_up(event, window, cx) {
++            return;
++        }
 +        if event.button == MouseButton::Left && std::mem::take(&mut self.selecting) {
 +            if let Some(index) = self.mouse_position_to_viewport_index(event.position, window)
 +                && let Some(selection) = &mut self.selection
@@ -3407,17 +3590,27 @@ index 6d680bc..3e18151 100644
              return;
          }
  
-@@ -932,7 +1178,8 @@ impl TerminalView {
+@@ -932,7 +1089,18 @@ impl TerminalView {
          window: &mut Window,
          cx: &mut Context<Self>,
      ) {
 -        if !event.modifiers.shift
++        self.update_link_hover(event.position, event.modifiers, window, cx);
++        if let Some(press) = &mut self.link_press {
++            press.moved((event.position.x.into(), event.position.y.into()));
++            if !links::command_link(event.modifiers)
++                || event.pressed_button != Some(MouseButton::Left)
++            {
++                press.cancel();
++            }
++            return;
++        }
 +        if !self.selecting
 +            && !event.modifiers.shift
              && self.input.is_some()
              && self.session.mouse_reporting_enabled()
              && self.session.mouse_sgr_enabled()
-@@ -973,11 +1220,7 @@ impl TerminalView {
+@@ -973,11 +1141,7 @@ impl TerminalView {
              }
          }
  
@@ -3430,7 +3623,21 @@ index 6d680bc..3e18151 100644
              return;
          }
  
-@@ -1006,7 +1249,7 @@ impl TerminalView {
+@@ -994,6 +1158,13 @@ impl TerminalView {
+     }
+ 
+     fn on_key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
++        if self.link_menu.is_some() {
++            self.cancel_link_interaction();
++            cx.notify();
++            cx.stop_propagation();
++            return;
++        }
++        self.cancel_link_interaction();
+         let raw_keystroke = event.keystroke.clone();
+         if should_skip_key_down_for_ime(self.input.is_some(), &raw_keystroke) {
+             return;
+@@ -1006,7 +1177,7 @@ impl TerminalView {
  
          let scroll_step = (self.session.rows() as i32 / 2).max(1);
  
@@ -3439,7 +3646,7 @@ index 6d680bc..3e18151 100644
              if keystroke.modifiers.shift {
                  match keystroke.key.as_str() {
                      "home" => {
-@@ -1044,15 +1287,14 @@ impl TerminalView {
+@@ -1044,15 +1215,14 @@ impl TerminalView {
              if keystroke.modifiers.control
                  && let Some(b) = ctrl_byte_for_keystroke(&keystroke)
              {
@@ -3457,7 +3664,7 @@ index 6d680bc..3e18151 100644
                  return;
              }
  
-@@ -1063,7 +1305,7 @@ impl TerminalView {
+@@ -1063,7 +1233,7 @@ impl TerminalView {
                  super_key: false,
              };
              if let Some(encoded) = encode_key_named(&keystroke.key, modifiers) {
@@ -3466,7 +3673,7 @@ index 6d680bc..3e18151 100644
                  return;
              }
              return;
-@@ -1108,20 +1350,7 @@ impl TerminalView {
+@@ -1108,20 +1278,7 @@ impl TerminalView {
              super_key: false,
          };
          if let Some(encoded) = encode_key_named(&keystroke.key, modifiers) {
@@ -3488,7 +3695,15 @@ index 6d680bc..3e18151 100644
          }
      }
  
-@@ -1182,8 +1411,9 @@ impl TerminalView {
+@@ -1131,6 +1288,7 @@ impl TerminalView {
+         window: &mut Window,
+         cx: &mut Context<Self>,
+     ) {
++        self.cancel_link_interaction();
+         let dy_lines: f32 = match event.delta {
+             ScrollDelta::Lines(p) => p.y,
+             ScrollDelta::Pixels(p) => f32::from(p.y) / 16.0,
+@@ -1182,8 +1340,9 @@ impl TerminalView {
              return None;
          }
  
@@ -3500,7 +3715,7 @@ index 6d680bc..3e18151 100644
          let mut row_index = (y / cell_height).floor() as i32;
          if row_index < 0 {
              row_index = 0;
-@@ -1194,9 +1424,7 @@ impl TerminalView {
+@@ -1194,9 +1353,7 @@ impl TerminalView {
          let row_index = row_index as usize;
  
          if let Some(Some(line)) = self.line_layouts.get(row_index) {
@@ -3511,7 +3726,7 @@ index 6d680bc..3e18151 100644
              let offset = *self.viewport_line_offsets.get(row_index).unwrap_or(&0);
              return Some(offset.saturating_add(byte_index));
          }
-@@ -1204,7 +1432,8 @@ impl TerminalView {
+@@ -1204,7 +1361,8 @@ impl TerminalView {
          let (col, row) = self.mouse_position_to_cell(position, window)?;
          let row_index = row.saturating_sub(1) as usize;
          let line = self.viewport_lines.get(row_index)?.as_str();
@@ -3521,7 +3736,7 @@ index 6d680bc..3e18151 100644
          let offset = *self.viewport_line_offsets.get(row_index).unwrap_or(&0);
          Some(offset.saturating_add(byte_index))
      }
-@@ -1212,13 +1441,13 @@ impl TerminalView {
+@@ -1212,13 +1370,13 @@ impl TerminalView {
      fn mouse_position_to_cell(
          &self,
          position: gpui::Point<gpui::Pixels>,
@@ -3537,7 +3752,7 @@ index 6d680bc..3e18151 100644
          let x = f32::from(position.x);
          let y = f32::from(position.y);
  
-@@ -1352,6 +1581,7 @@ impl EntityInputHandler for TerminalView {
+@@ -1352,6 +1510,7 @@ impl EntityInputHandler for TerminalView {
  }
  
  struct TerminalPrepaintState {
@@ -3545,7 +3760,7 @@ index 6d680bc..3e18151 100644
      line_height: Pixels,
      shaped_lines: Vec<gpui::ShapedLine>,
      background_quads: Vec<PaintQuad>,
-@@ -1369,6 +1599,7 @@ const CELL_STYLE_FLAG_UNDERLINE: u8 = 0x08;
+@@ -1369,6 +1528,7 @@ const CELL_STYLE_FLAG_UNDERLINE: u8 = 0x08;
  const CELL_STYLE_FLAG_FAINT: u8 = 0x10;
  const CELL_STYLE_FLAG_INVISIBLE: u8 = 0x20;
  const CELL_STYLE_FLAG_STRIKETHROUGH: u8 = 0x40;
@@ -3553,7 +3768,7 @@ index 6d680bc..3e18151 100644
  
  #[derive(Clone, Copy, Debug, PartialEq)]
  struct TerminalAppearance {
-@@ -1404,10 +1635,16 @@ impl TerminalAppearance {
+@@ -1404,10 +1564,16 @@ impl TerminalAppearance {
              } else {
                  (default_fg, default_bg, self.foreground, self.background)
              };
@@ -3572,7 +3787,7 @@ index 6d680bc..3e18151 100644
              run.bg = target_bg;
          }
          if run.flags & CELL_STYLE_FLAG_INVISIBLE != 0 {
-@@ -1419,7 +1656,8 @@ impl TerminalAppearance {
+@@ -1419,7 +1585,8 @@ impl TerminalAppearance {
  
  fn has_default_background(run: &StyleRun, default_bg: Rgb) -> bool {
      // Inverse backgrounds represent the original foreground and stay opaque.
@@ -3582,7 +3797,7 @@ index 6d680bc..3e18151 100644
  }
  
  fn bounds_outside(bounds: Bounds<Pixels>, excluded: Option<Bounds<Pixels>>) -> Vec<Bounds<Pixels>> {
-@@ -1523,20 +1761,21 @@ pub(crate) const BOX_DIR_DOWN: u8 = 0x08;
+@@ -1523,20 +1690,21 @@ pub(crate) const BOX_DIR_DOWN: u8 = 0x08;
  pub(crate) fn box_drawing_mask(ch: char) -> Option<(u8, f32)> {
      let light = 1.0;
      let heavy = 1.35;
@@ -3616,7 +3831,7 @@ index 6d680bc..3e18151 100644
          _ => return None,
      };
  
-@@ -1544,9 +1783,6 @@ pub(crate) fn box_drawing_mask(ch: char) -> Option<(u8, f32)> {
+@@ -1544,9 +1712,6 @@ pub(crate) fn box_drawing_mask(ch: char) -> Option<(u8, f32)> {
          '━' | '┃' | '┏' | '┓' | '┗' | '┛' | '┣' | '┫' | '┳' | '┻' | '╋' => {
              heavy
          }
@@ -3626,7 +3841,7 @@ index 6d680bc..3e18151 100644
          _ => light,
      };
  
-@@ -1640,33 +1876,153 @@ fn text_run_for_key(base_font: &gpui::Font, key: TextRunKey, len: usize) -> Text
+@@ -1640,33 +1805,154 @@ fn text_run_for_key(base_font: &gpui::Font, key: TextRunKey, len: usize) -> Text
      }
  }
  
@@ -3776,6 +3991,7 @@ index 6d680bc..3e18151 100644
 +    line
 +}
 +
++#[cfg(test)]
 +pub(crate) fn byte_index_for_column_in_line(line: &str, col: u16) -> usize {
 +    use unicode_width::UnicodeWidthChar as _;
  
@@ -3796,7 +4012,7 @@ index 6d680bc..3e18151 100644
      line.len()
  }
  
-@@ -1737,9 +2093,45 @@ impl Element for TerminalTextElement {
+@@ -1737,9 +2023,45 @@ impl Element for TerminalTextElement {
          let run_font = style.font();
          let run_color = style.color;
  
@@ -3843,7 +4059,7 @@ index 6d680bc..3e18151 100644
              if view.viewport_lines.is_empty() {
                  view.line_layouts.clear();
                  view.line_layout_key = None;
-@@ -1784,13 +2176,14 @@ impl Element for TerminalTextElement {
+@@ -1784,13 +2106,14 @@ impl Element for TerminalTextElement {
                                      | CELL_STYLE_FLAG_STRIKETHROUGH),
                          };
  
@@ -3864,7 +4080,7 @@ index 6d680bc..3e18151 100644
  
                          if start > byte_pos {
                              runs.push(TextRun {
-@@ -1833,15 +2226,22 @@ impl Element for TerminalTextElement {
+@@ -1833,15 +2156,22 @@ impl Element for TerminalTextElement {
                      });
                  }
  
@@ -3895,7 +4111,7 @@ index 6d680bc..3e18151 100644
              }
          });
  
-@@ -2027,7 +2427,6 @@ impl Element for TerminalTextElement {
+@@ -2027,7 +2357,6 @@ impl Element for TerminalTextElement {
  
          let box_drawing_quads = cell_metrics(window, &font)
              .map(|(cell_width, _)| {
@@ -3903,7 +4119,7 @@ index 6d680bc..3e18151 100644
                  let mut quads = Vec::new();
  
                  let view = self.view.read(cx);
-@@ -2036,12 +2435,11 @@ impl Element for TerminalTextElement {
+@@ -2036,12 +2365,11 @@ impl Element for TerminalTextElement {
                      let runs = view.viewport_style_runs.get(row).map(|v| v.as_slice());
                      let mut run_idx: usize = 0;
  
@@ -3920,7 +4136,7 @@ index 6d680bc..3e18151 100644
  
                          if let Some((_, _)) = box_drawing_mask(ch) {
                              let fg = runs
-@@ -2084,8 +2482,6 @@ impl Element for TerminalTextElement {
+@@ -2084,8 +2412,6 @@ impl Element for TerminalTextElement {
                                  ch,
                              ));
                          }
@@ -3929,7 +4145,7 @@ index 6d680bc..3e18151 100644
                      }
                  }
  
-@@ -2095,18 +2491,15 @@ impl Element for TerminalTextElement {
+@@ -2095,18 +2421,15 @@ impl Element for TerminalTextElement {
  
          let cursor = {
              let view = self.view.read(cx);
@@ -3951,7 +4167,7 @@ index 6d680bc..3e18151 100644
  
              Some(fill(
                  Bounds::new(point(x, y), size(px(2.0), line_height)),
-@@ -2115,6 +2508,7 @@ impl Element for TerminalTextElement {
+@@ -2115,6 +2438,7 @@ impl Element for TerminalTextElement {
          });
  
          TerminalPrepaintState {
@@ -3959,7 +4175,33 @@ index 6d680bc..3e18151 100644
              line_height,
              shaped_lines,
              background_quads,
-@@ -2143,74 +2537,83 @@ impl Element for TerminalTextElement {
+@@ -2137,80 +2461,127 @@ impl Element for TerminalTextElement {
+         cx: &mut App,
+     ) {
+         self.view.update(cx, |view, _cx| {
++            if view.last_bounds != Some(bounds) {
++                view.cancel_link_interaction();
++            }
+             view.last_bounds = Some(bounds);
+         });
+ 
++        let on_move =
++            window.listener_for(&self.view, |view, event: &MouseMoveEvent, window, cx| {
++                view.update_link_hover(event.position, event.modifiers, window, cx);
++                if let Some(press) = &mut view.link_press {
++                    press.moved((event.position.x.into(), event.position.y.into()));
++                    if !links::command_link(event.modifiers)
++                        || event.pressed_button != Some(MouseButton::Left)
++                    {
++                        press.cancel();
++                    }
++                }
++            });
++        window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
++            if phase == gpui::DispatchPhase::Capture {
++                on_move(event, window, cx);
++            }
++        });
          let focus_handle = { self.view.read(cx).focus_handle.clone() };
          window.handle_input(
              &focus_handle,
@@ -3991,11 +4233,6 @@ index 6d680bc..3e18151 100644
 -                .background_quads
 -                .drain(..)
 -                .chain(prepaint.selection_quads.drain(..))
--            {
--                paint_outside(quad.bounds, excluded, window, |window| {
--                    window.paint_quad(quad.clone());
--                });
--            }
 +            window.paint_layer(bounds, |window| {
 +                for quad in prepaint.background_quads.drain(..) {
 +                    paint_outside(quad.bounds, excluded, window, |window| {
@@ -4004,16 +4241,7 @@ index 6d680bc..3e18151 100644
 +                }
 +            });
 +            ImageDraw::paint_layer(&prepaint.images, 1, window);
- 
--            let origin = bounds.origin;
--            for (row, line) in prepaint.shaped_lines.iter().enumerate() {
--                let y = origin.y + prepaint.line_height * row as f32;
--                let row_bounds = Bounds::new(
--                    point(origin.x, y),
--                    size(bounds.size.width, prepaint.line_height),
--                );
--                paint_outside(row_bounds, excluded, window, |window| {
--                    let _ = line.paint(
++
 +            window.paint_layer(bounds, |window| {
 +                for quad in prepaint.selection_quads.drain(..) {
 +                    paint_outside(quad.bounds, excluded, window, |window| {
@@ -4024,7 +4252,7 @@ index 6d680bc..3e18151 100644
 +                for (row, line) in prepaint.shaped_lines.iter().enumerate() {
 +                    let y = origin.y + prepaint.line_height * row as f32;
 +                    let row_bounds = Bounds::new(
-                         point(origin.x, y),
++                        point(origin.x, y),
 +                        size(bounds.size.width, prepaint.line_height),
 +                    );
 +                    paint_outside(row_bounds, excluded, window, |window| {
@@ -4045,13 +4273,43 @@ index 6d680bc..3e18151 100644
 +                }
 +            });
 +            ImageDraw::paint_layer(&prepaint.images, 2, window);
-+
++            let view = self.view.read(cx);
++            if let Some(link) = &view.hovered_link
++                && let Some((cw, ch)) = view.last_cell_metrics
+             {
+-                paint_outside(quad.bounds, excluded, window, |window| {
+-                    window.paint_quad(quad.clone());
+-                });
++                for &(col, row) in &link.cells {
++                    window.paint_quad(fill(
++                        Bounds::new(
++                            bounds.origin
++                                + point(
++                                    px(cw * f32::from(col)),
++                                    px(ch * (f32::from(row) + 1.0) - 1.0),
++                                ),
++                            size(px(cw), px(1.0)),
++                        ),
++                        hsla_from_rgb(view.appearance.foreground),
++                    ));
++                }
+             }
+ 
+-            let origin = bounds.origin;
+-            for (row, line) in prepaint.shaped_lines.iter().enumerate() {
+-                let y = origin.y + prepaint.line_height * row as f32;
+-                let row_bounds = Bounds::new(
+-                    point(origin.x, y),
+-                    size(bounds.size.width, prepaint.line_height),
+-                );
+-                paint_outside(row_bounds, excluded, window, |window| {
 +            window.paint_layer(bounds, |window| {
 +                if let Some(bg) = prepaint.marked_text_background.take() {
 +                    window.paint_quad(bg);
 +                }
 +                if let Some((line, origin)) = prepaint.marked_text.as_ref() {
-+                    let _ = line.paint(
+                     let _ = line.paint(
+-                        point(origin.x, y),
 +                        *origin,
                          prepaint.line_height,
                          gpui::TextAlign::Left,
@@ -4094,13 +4352,25 @@ index 6d680bc..3e18151 100644
          });
      }
  }
-@@ -2218,13 +2621,19 @@ impl Element for TerminalTextElement {
+@@ -2218,13 +2589,31 @@ impl Element for TerminalTextElement {
  impl Render for TerminalView {
      fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
          ensure_key_bindings(cx);
 +        if !self.image_cleanup_registered {
 +            cx.on_release(|view, cx| view.image_cache.clear(cx))
 +                .detach();
++            cx.on_blur(&self.focus_handle, window, |view, _, cx| {
++                view.cancel_link_interaction();
++                cx.notify();
++            })
++            .detach();
++            cx.observe_window_activation(window, |view, window, cx| {
++                if !window.is_window_active() {
++                    view.cancel_link_interaction();
++                    cx.notify();
++                }
++            })
++            .detach();
 +            self.image_cleanup_registered = true;
 +        }
  
@@ -4115,14 +4385,41 @@ index 6d680bc..3e18151 100644
  
          if self.pending_refresh {
              self.refresh_viewport();
-@@ -2262,6 +2671,14 @@ impl Render for TerminalView {
+@@ -2243,9 +2632,26 @@ impl Render for TerminalView {
+             }
+         }
+ 
++        let menu = self.link_menu_element(cx);
++        let hover = self.hovered_link.as_ref().map(|link| link.url.clone());
++        let fg = hsla_from_rgb(self.appearance.foreground);
++        let bg = hsla_from_rgb(self.appearance.background);
+         div()
++            .id("terminal-view")
++            .relative()
+             .size_full()
+             .flex()
++            .when(hover.is_some(), |view| view.cursor_pointer())
++            .on_modifiers_changed(cx.listener(
++                |view, event: &gpui::ModifiersChangedEvent, window, cx| {
++                    if !links::command_link(event.modifiers)
++                        && let Some(press) = &mut view.link_press
++                    {
++                        press.cancel();
++                    }
++                    view.update_link_hover(window.mouse_position(), event.modifiers, window, cx);
++                },
++            ))
+             .track_focus(&self.focus_handle)
+             .key_context(KEY_CONTEXT)
+             .on_action(cx.listener(Self::on_copy))
+@@ -2262,13 +2668,38 @@ impl Render for TerminalView {
              .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
              .on_mouse_up(MouseButton::Middle, cx.listener(Self::on_mouse_up))
              .on_mouse_up(MouseButton::Right, cx.listener(Self::on_mouse_up))
 +            .on_mouse_up_out(
 +                MouseButton::Left,
 +                cx.listener(|view, event: &MouseUpEvent, window, cx| {
-+                    if view.selecting {
++                    if view.selecting || view.link_press.is_some() {
 +                        view.on_mouse_up(event, window, cx);
 +                    }
 +                }),
@@ -4130,7 +4427,17 @@ index 6d680bc..3e18151 100644
              .text_color(hsla_from_rgb(self.appearance.foreground))
              .font(self.font.clone())
              .whitespace_nowrap()
-@@ -2269,6 +2686,13 @@ impl Render for TerminalView {
+             .child(TerminalTextElement { view: cx.entity() })
++            .when_some(hover, |view, url| {
++                view.child(links::link_tooltip(
++                    url,
++                    fg,
++                    bg,
++                    self.last_bounds
++                        .map_or(px(520.0), |bounds| bounds.size.width - px(8.0)),
++                ))
++            })
++            .children(menu)
      }
  }
  
@@ -4144,7 +4451,39 @@ index 6d680bc..3e18151 100644
  pub(crate) fn cell_metrics(window: &mut gpui::Window, font: &gpui::Font) -> Option<(f32, f32)> {
      let mut style = window.text_style();
      style.font_family = font.family.clone();
-@@ -2454,6 +2878,71 @@ mod tests {
+@@ -2301,30 +2732,7 @@ pub(crate) fn cell_metrics(window: &mut gpui::Window, font: &gpui::Font) -> Opti
+ mod tests {
+     use ghostty_vt::Rgb;
+ 
+-    use super::{url_at_byte_index, url_at_column_in_line, window_position_to_local};
+-
+-    #[test]
+-    fn url_detection_finds_https_links() {
+-        let text = "Visit https://google.com for search";
+-        let idx = text.find("google").unwrap();
+-        assert_eq!(
+-            url_at_byte_index(text, idx).as_deref(),
+-            Some("https://google.com")
+-        );
+-    }
+-
+-    #[test]
+-    fn url_detection_finds_https_links_by_cell_column() {
+-        let line = "https://google.com";
+-        assert_eq!(
+-            url_at_column_in_line(line, 1).as_deref(),
+-            Some("https://google.com")
+-        );
+-        assert_eq!(
+-            url_at_column_in_line(line, 10).as_deref(),
+-            Some("https://google.com")
+-        );
+-    }
++    use super::window_position_to_local;
+ 
+     #[test]
+     fn mouse_position_to_local_accounts_for_bounds_origin() {
+@@ -2454,6 +2862,71 @@ mod tests {
          }
      }
  
@@ -5419,5 +5758,550 @@ index 0000000..82dac82
 +            }
 +            assert!(image_bounds(&placement, viewport, (10.0, 20.0), 2.0).is_none());
 +        }
++    }
++}
+diff --git a/crates/gpui_ghostty_terminal/src/view/links.rs b/crates/gpui_ghostty_terminal/src/view/links.rs
+new file mode 100644
+index 0000000..4ac8334
+--- /dev/null
++++ b/crates/gpui_ghostty_terminal/src/view/links.rs
+@@ -0,0 +1,302 @@
++//! URL detection and click guards shared by terminal surfaces.
++use std::ops::Range;
++
++/// A visible target, in zero-based grid coordinates. Its cells are part of its
++/// identity: two occurrences of the same URL are different click targets.
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub struct Link {
++    pub url: String,
++    pub cells: Vec<(u16, u16)>,
++}
++
++/// Only browser URLs are accepted, including localhost, ports and IPv6. Keep the
++/// original spelling for the tooltip and clipboard; never interpret shell text.
++pub fn is_web_url(text: &str) -> bool {
++    let Some((scheme, authority)) = text.split_once("://") else {
++        return false;
++    };
++    (scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https"))
++        && !authority.is_empty()
++        && !authority.starts_with('/')
++        && !text
++            .chars()
++            .any(|ch| ch.is_control() || ch.is_whitespace() || ch == '\\')
++        && url::Url::parse(text).is_ok_and(|url| url.has_host())
++}
++
++fn delimiter(ch: char) -> bool {
++    ch.is_whitespace() || ch.is_control() || matches!(ch, '<' | '>' | '"' | '\'' | '`' | '\\')
++}
++
++/// Find a URL containing this byte, excluding surrounding prose punctuation.
++pub fn url_range_at(text: &str, index: usize) -> Option<Range<usize>> {
++    if index >= text.len() || !text.is_char_boundary(index) {
++        return None;
++    }
++    for (start, _) in text.char_indices().take_while(|(start, _)| *start <= index) {
++        let rest = &text[start..];
++        if !(rest
++            .get(..7)
++            .is_some_and(|s| s.eq_ignore_ascii_case("http://"))
++            || rest
++                .get(..8)
++                .is_some_and(|s| s.eq_ignore_ascii_case("https://")))
++        {
++            continue;
++        }
++        // Do not turn an embedded scheme in an identifier into a target.
++        if start > 0
++            && text[..start].chars().next_back().is_some_and(|ch| {
++                ch.is_alphanumeric() || matches!(ch, '_' | '/' | ':' | '-' | '.' | '%' | '=')
++            })
++        {
++            continue;
++        }
++        let mut end = start + rest.find(delimiter).unwrap_or(rest.len());
++        loop {
++            let candidate = &text[start..end];
++            let Some(last) = candidate.chars().next_back() else {
++                break;
++            };
++            let unmatched = match last {
++                ')' => candidate.matches(')').count() > candidate.matches('(').count(),
++                ']' => candidate.matches(']').count() > candidate.matches('[').count(),
++                '}' => candidate.matches('}').count() > candidate.matches('{').count(),
++                _ => false,
++            };
++            if unmatched || matches!(last, '.' | ',' | ';' | ':' | '!' | '?') {
++                end -= last.len_utf8();
++            } else {
++                break;
++            }
++        }
++        if (start..end).contains(&index) && is_web_url(&text[start..end]) {
++            return Some(start..end);
++        }
++    }
++    None
++}
++
++/// Search only the contiguous token surrounding a cell (at most 8192 cells).
++/// Empty strings represent wide-cell continuations; absent cells are blanks.
++/// Row edges join only if both cells contain token text. Protocols without soft
++/// wrap flags cannot distinguish this from a hard newline at the exact edge.
++pub fn plain_link_at<'a>(
++    width: u16,
++    height: u16,
++    col: u16,
++    row: u16,
++    text_at: impl Fn(u16, u16) -> Option<&'a str>,
++) -> Option<Link> {
++    if width == 0 || col >= width || row >= height {
++        return None;
++    }
++    let width = usize::from(width);
++    let total = width * usize::from(height);
++    let hit = usize::from(row) * width + usize::from(col);
++    let cell = |index: usize| text_at((index % width) as u16, (index / width) as u16);
++    let token_cell = |index| cell(index).is_some_and(|text| !text.chars().any(delimiter));
++    if !token_cell(hit) {
++        return None;
++    }
++    let mut start = hit;
++    while start > 0 && hit - start < 8192 && token_cell(start - 1) {
++        start -= 1;
++    }
++    let mut end = hit + 1;
++    while end < total && end - start < 8192 && token_cell(end) {
++        end += 1;
++    }
++    let mut text = String::new();
++    let mut spans = Vec::new();
++    let mut previous = 0..0;
++    for index in start..end {
++        let symbol = cell(index)?;
++        let from = text.len();
++        text.push_str(symbol);
++        let span = if symbol.is_empty() {
++            previous.clone()
++        } else {
++            from..text.len()
++        };
++        previous = span.clone();
++        spans.push(span);
++    }
++    let range = url_range_at(&text, spans[hit - start].start)?;
++    let cells = spans
++        .iter()
++        .enumerate()
++        .filter_map(|(offset, span)| {
++            (span.start < range.end && span.end > range.start).then(|| {
++                let index = start + offset;
++                ((index % width) as u16, (index / width) as u16)
++            })
++        })
++        .collect();
++    Some(Link {
++        url: text[range].to_owned(),
++        cells,
++    })
++}
++
++/// The caller supplies a frame/input identity and clears this on focus changes.
++/// Movement is latched: returning to the down point never re-arms a drag.
++#[derive(Clone, Debug)]
++pub struct LinkPress<T> {
++    pub target: T,
++    origin: (f32, f32),
++    cancelled: bool,
++}
++
++impl<T: PartialEq> LinkPress<T> {
++    pub fn new(target: T, position: (f32, f32)) -> Self {
++        Self {
++            target,
++            origin: position,
++            cancelled: false,
++        }
++    }
++    pub fn cancel(&mut self) {
++        self.cancelled = true;
++    }
++    pub fn moved(&mut self, position: (f32, f32)) {
++        let dx = position.0 - self.origin.0;
++        let dy = position.1 - self.origin.1;
++        self.cancelled |= !dx.is_finite() || !dy.is_finite() || dx * dx + dy * dy > 9.0;
++    }
++    pub fn release(mut self, target: Option<&T>, position: (f32, f32), eligible: bool) -> bool {
++        self.moved(position);
++        eligible && !self.cancelled && target == Some(&self.target)
++    }
++}
++
++/// Command alone reserves a browser gesture. Shift always preserves selection.
++pub fn command_link(modifiers: gpui::Modifiers) -> bool {
++    modifiers.platform && !modifiers.shift && !modifiers.alt && !modifiers.control
++}
++
++/// Render from current hover state so the destination changes immediately when
++/// crossing links or releasing Command (a terminal-wide GPUI tooltip is sticky).
++pub fn link_tooltip(
++    url: String,
++    foreground: gpui::Hsla,
++    background: gpui::Hsla,
++    width: gpui::Pixels,
++) -> gpui::Div {
++    use gpui::{div, prelude::*, px};
++    div()
++        .absolute()
++        .left(px(4.0))
++        .bottom(px(4.0))
++        .max_w(width.min(px(520.0)).max(px(1.0)))
++        .p_2()
++        .rounded_md()
++        .bg(background)
++        .text_color(foreground)
++        .font_family(".SystemUIFont")
++        .text_size(px(12.0))
++        .whitespace_normal()
++        .child(url)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn accepts_only_explicit_web_urls() {
++        for url in [
++            "http://localhost:3000/a?x=1#part",
++            "https://[::1]:8443/a",
++            "HTTPS://example.com/你好",
++        ] {
++            assert!(is_web_url(url), "{url}");
++        }
++        for url in [
++            "javascript:alert(1)",
++            "file:///tmp/a",
++            "mailto:a@b.com",
++            "https://",
++            "http:example.com",
++            "https:///example.com",
++            "https://example.com/\nnext",
++            "https://example.com\\a",
++        ] {
++            assert!(!is_web_url(url), "{url}");
++        }
++    }
++
++    #[test]
++    fn trims_prose_but_preserves_balanced_url_punctuation() {
++        let text = "See (https://example.com/a_(b)), then http://localhost:3000.";
++        let range = url_range_at(text, text.find("example").unwrap()).unwrap();
++        assert_eq!(&text[range], "https://example.com/a_(b)");
++        let index = text.find("localhost").unwrap();
++        assert_eq!(
++            &text[url_range_at(text, index).unwrap()],
++            "http://localhost:3000"
++        );
++        assert!(url_range_at(text, text.find(",").unwrap()).is_none());
++        assert!(url_range_at("xhttps://example.com", 10).is_none());
++        assert!(url_range_at("https://example.com ", 19).is_none());
++    }
++
++    #[test]
++    fn joins_wrapped_cells_and_preserves_coordinates() {
++        let rows = ["http://local", "host:3000/a "];
++        let chars: Vec<Vec<String>> = rows
++            .iter()
++            .map(|row| row.chars().map(|ch| ch.to_string()).collect())
++            .collect();
++        let lookup = |col, row| {
++            chars
++                .get(row as usize)?
++                .get(col as usize)
++                .map(String::as_str)
++        };
++        let first = plain_link_at(13, 2, 1, 0, lookup);
++        // A blank/missing cell before the right edge cannot be a wrap.
++        assert_eq!(first.unwrap().url, "http://local");
++        let wrapped = plain_link_at(12, 2, 1, 1, lookup).unwrap();
++        assert_eq!(wrapped.url, "http://localhost:3000/a");
++        assert!(wrapped.cells.contains(&(0, 1)));
++        assert!(plain_link_at(12, 2, 11, 1, lookup).is_none());
++    }
++
++    #[test]
++    fn cell_offsets_handle_wide_and_combining_text() {
++        let cells = [
++            "你", "", " ", "h", "t", "t", "p", ":", "/", "/", "a", ".", "c", "o", "m", " ",
++        ];
++        let link = plain_link_at(16, 1, 10, 0, |col, _| cells.get(col as usize).copied()).unwrap();
++        assert_eq!(link.url, "http://a.com");
++        assert_eq!(link.cells.first(), Some(&(3, 0)));
++        assert!(plain_link_at(16, 1, 15, 0, |col, _| cells.get(col as usize).copied()).is_none());
++    }
++
++    #[test]
++    fn click_requires_same_target_modifiers_and_small_motion() {
++        let press = LinkPress::new(("url", 1), (10.0, 10.0));
++        assert!(press.clone().release(Some(&("url", 1)), (12.0, 10.0), true));
++        assert!(!press.clone().release(Some(&("url", 2)), (10.0, 10.0), true));
++        assert!(!press.clone().release(None, (10.0, 10.0), true));
++        assert!(
++            !press
++                .clone()
++                .release(Some(&("url", 1)), (10.0, 10.0), false)
++        );
++        let mut dragged = press.clone();
++        dragged.moved((20.0, 10.0));
++        assert!(!dragged.release(Some(&("url", 1)), (10.0, 10.0), true));
++        let mut cancelled = press;
++        cancelled.cancel();
++        assert!(!cancelled.release(Some(&("url", 1)), (10.0, 10.0), true));
++        let mut modifiers = gpui::Modifiers {
++            platform: true,
++            ..Default::default()
++        };
++        assert!(command_link(modifiers));
++        modifiers.shift = true;
++        assert!(!command_link(modifiers));
++    }
++}
+diff --git a/crates/gpui_ghostty_terminal/src/view/terminal_links.rs b/crates/gpui_ghostty_terminal/src/view/terminal_links.rs
+new file mode 100644
+index 0000000..fbcece4
+--- /dev/null
++++ b/crates/gpui_ghostty_terminal/src/view/terminal_links.rs
+@@ -0,0 +1,231 @@
++use super::*;
++use links::{Link, command_link, is_web_url, plain_link_at};
++
++impl TerminalView {
++    /// Hosts should fence navigation/actions while native composition or a menu is active.
++    pub fn is_composing(&self) -> bool {
++        self.marked_text.is_some()
++    }
++    pub fn link_menu_open(&self) -> bool {
++        self.link_menu.is_some()
++    }
++
++    /// Cancel transient link UI when the host switches or detaches a terminal.
++    pub fn cancel_link_interaction(&mut self) {
++        if let Some(press) = &mut self.link_press {
++            press.cancel();
++        }
++        self.hovered_link = None;
++        self.link_menu = None;
++    }
++
++    pub(super) fn link_at(
++        &self,
++        position: gpui::Point<Pixels>,
++        window: &mut Window,
++    ) -> Option<Link> {
++        if !self.pending_output.is_empty()
++            || self.pending_refresh
++            || !self
++                .last_bounds
++                .is_some_and(|bounds| bounds.contains(&position))
++        {
++            return None;
++        }
++        let (col, row) = self.mouse_position_to_cell(position, window)?;
++        let local = self.mouse_position_to_local(position);
++        let (cw, ch) = self.last_cell_metrics?;
++        if f32::from(local.x) >= cw * f32::from(self.session.cols())
++            || f32::from(local.y) >= ch * f32::from(self.session.rows())
++        {
++            return None;
++        }
++        if let Some(url) = self
++            .session
++            .hyperlink_at(col, row)
++            .filter(|url| !url.is_empty())
++        {
++            // An unsupported OSC 8 target must not fall through to its label.
++            if !is_web_url(&url) {
++                return None;
++            }
++            let width = usize::from(self.session.cols());
++            let hit = usize::from(row - 1) * width + usize::from(col - 1);
++            let same = |index: usize| {
++                self.session
++                    .hyperlink_at((index % width) as u16 + 1, (index / width) as u16 + 1)
++                    .as_deref()
++                    == Some(url.as_str())
++            };
++            let mut start = hit;
++            while start > 0 && hit - start < 8192 && same(start - 1) {
++                start -= 1;
++            }
++            let mut end = hit + 1;
++            while end < width * usize::from(self.session.rows()) && end - start < 8192 && same(end)
++            {
++                end += 1;
++            }
++            return Some(Link {
++                url,
++                cells: (start..end)
++                    .map(|index| ((index % width) as u16, (index / width) as u16))
++                    .collect(),
++            });
++        }
++        plain_link_at(
++            self.session.cols(),
++            self.session.rows(),
++            col - 1,
++            row - 1,
++            |col, row| {
++                let line = self.viewport_lines.get(usize::from(row))?;
++                let cells = self.viewport_cells.get(usize::from(row))?;
++                let index = cells
++                    .partition_point(|cell| cell.column <= usize::from(col))
++                    .checked_sub(1)?;
++                let cell = &cells[index];
++                if usize::from(col) >= cell.column + cell.width {
++                    return None;
++                }
++                if usize::from(col) > cell.column {
++                    return Some("");
++                }
++                let end = cells
++                    .get(index + 1)
++                    .map_or(line.len(), |cell| cell.byte_index);
++                line.get(cell.byte_index..end)
++            },
++        )
++    }
++
++    pub(super) fn update_link_hover(
++        &mut self,
++        position: gpui::Point<Pixels>,
++        modifiers: gpui::Modifiers,
++        window: &mut Window,
++        cx: &mut Context<Self>,
++    ) {
++        let next = if command_link(modifiers)
++            && self.marked_text.is_none()
++            && self.focus_handle.is_focused(window)
++            && window.is_window_active()
++            && self.link_menu.is_none()
++            && !self.selecting
++        {
++            self.link_at(position, window)
++        } else {
++            None
++        };
++        if self.hovered_link != next {
++            self.hovered_link = next;
++            cx.notify();
++        }
++    }
++
++    pub(super) fn link_mouse_down(
++        &mut self,
++        event: &MouseDownEvent,
++        window: &mut Window,
++        cx: &mut Context<Self>,
++    ) -> bool {
++        self.link_press = None;
++        self.link_menu = None;
++        if self.marked_text.is_some() {
++            return false;
++        }
++        if event.button == MouseButton::Left && command_link(event.modifiers) {
++            if let Some(link) = self.link_at(event.position, window) {
++                self.link_press = Some(links::LinkPress::new(
++                    link,
++                    (event.position.x.into(), event.position.y.into()),
++                ));
++                cx.notify();
++                return true;
++            }
++        } else if event.button == MouseButton::Right
++            && (event.modifiers.shift
++                || !self.session.mouse_reporting_enabled()
++                || self.input.is_none())
++            && let Some(link) = self.link_at(event.position, window)
++        {
++            self.hovered_link = None;
++            self.link_menu = Some((event.position, link));
++            cx.notify();
++            return true;
++        }
++        false
++    }
++
++    pub(super) fn link_mouse_up(
++        &mut self,
++        event: &MouseUpEvent,
++        window: &mut Window,
++        cx: &mut Context<Self>,
++    ) -> bool {
++        if event.button == MouseButton::Left
++            && let Some(press) = self.link_press.take()
++        {
++            let current = self.link_at(event.position, window);
++            let url = press.target.url.clone();
++            if press.release(
++                current.as_ref(),
++                (event.position.x.into(), event.position.y.into()),
++                command_link(event.modifiers)
++                    && self.marked_text.is_none()
++                    && self.focus_handle.is_focused(window)
++                    && window.is_window_active(),
++            ) {
++                cx.open_url(&url);
++            }
++            cx.notify();
++            return true;
++        }
++        event.button == MouseButton::Right && self.link_menu.is_some()
++    }
++
++    pub(super) fn link_menu_element(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
++        let (position, link) = self.link_menu.as_ref()?;
++        let bounds = self.last_bounds?;
++        let local = *position - bounds.origin;
++        let url = link.url.clone();
++        Some(
++            div()
++                .id("terminal-link-menu")
++                .absolute()
++                .left(local.x.min((bounds.size.width - px(180.0)).max(px(0.0))))
++                .top(local.y.min((bounds.size.height - px(36.0)).max(px(0.0))))
++                .w(px(180.0))
++                .p_2()
++                .rounded_md()
++                .bg(hsla_from_rgb(self.appearance.background))
++                .border_1()
++                .border_color(hsla_from_rgb(self.appearance.foreground))
++                .font_family(".SystemUIFont")
++                .text_size(px(12.0))
++                .cursor_pointer()
++                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
++                .on_mouse_up(
++                    MouseButton::Left,
++                    cx.listener(move |view, _, window, cx| {
++                        if view
++                            .link_menu
++                            .as_ref()
++                            .is_some_and(|(_, link)| link.url == url)
++                        {
++                            view.copy_text(url.clone(), window, cx);
++                        }
++                        view.link_menu = None;
++                        cx.stop_propagation();
++                        cx.notify();
++                    }),
++                )
++                .on_mouse_down_out(cx.listener(|view, _, _, cx| {
++                    view.link_menu = None;
++                    cx.notify();
++                }))
++                .child("Copy link address")
++                .into_any_element(),
++        )
 +    }
 +}

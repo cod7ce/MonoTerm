@@ -2,7 +2,7 @@
 
 A native macOS terminal built with Rust, GPUI and Ghostty. Each local pane owns a real PTY; Ghostty handles terminal state and GPUI renders the terminal and application.
 
-**Current version: 0.2.0.** Apple Silicon, macOS 14 or later.
+**Current version: 0.3.0.** Apple Silicon, macOS 14 or later.
 
 ## Features
 
@@ -54,7 +54,9 @@ The app bundle contains its runtime resources and framework. Cargo, Zig and the 
 | Close active tab | Cmd-Shift-W |
 | Next / previous tab | Ctrl-Tab / Ctrl-Shift-Tab |
 | Split right / below | Cmd-D / Cmd-Shift-D |
-| Next / previous pane | Cmd-Alt-Right / Cmd-Alt-Left |
+| Previous / next pane | Cmd-[ / Cmd-] (also Cmd-Alt-Left / Cmd-Alt-Right) |
+| Select tab 1–9 | Cmd-1 … Cmd-9 |
+| Previous / next agent in Herdr | Cmd-Shift-[ / Cmd-Shift-] |
 | Customize tab | Cmd-Shift-E, or its context menu |
 | Toggle sidebar | Cmd-B |
 | Toggle Zen | Cmd-Shift-Z |
@@ -64,11 +66,21 @@ The app bundle contains its runtime resources and framework. Cargo, Zig and the 
 | Restart active shell | Cmd-Shift-R |
 | Quit | Cmd-Q |
 
-Limits are 12 tabs, 8 panes per tab and 48 panes total. Closing a pane terminates its shell; closing a tab terminates all its local panes. Tabs and pane layouts are not restored after quitting. Preferences are stored under `~/Library/Application Support/MonoTerm/`; `MONOTERM_CONFIG_DIR` selects an isolated test directory.
+Shared shortcuts apply in main and Herdr windows. Zen, shell restart and tab customization are main-window actions. In Herdr, indexed tabs refer to the current Space; an absent index does nothing. Pane/tab cycling wraps, and agent cycling follows the Agents list's ordering and filter even when the sidebar is hidden. The native Herdr close button detaches; Cmd-W closes its focused daemon pane and Cmd-Shift-W closes its focused daemon tab.
+
+Local limits are 12 tabs, 8 panes per tab and 48 panes total. Closing a pane terminates its shell; closing a tab terminates all its panes. Tabs and pane layouts are not restored after quitting. Preferences are stored under `~/Library/Application Support/MonoTerm/`; `MONOTERM_CONFIG_DIR` selects an isolated test directory.
+
+Font family and size are shared and saved automatically (Menlo, 14px by default; 10–28px). Settings → Terminal searches installed fonts, initially filters to monospace families, and previews English, CJK, code, Nerd symbols and emoji. Show all fonts includes proportional families, which still occupy terminal grid cells. Missing fonts temporarily use Menlo while retaining the chosen name. Install/uninstall font changes are detected after restarting MonoTerm. Settings itself keeps the system font.
+
+`windows.json` keeps independent main/Herdr sidebar visibility and width, main Zen mode, Herdr section choices and split ratio, and repository folding. Window-size auto-hide preserves the explicit sidebar preference. Drag sizes save on release. `typography.json` keeps family and size and accepts earlier font-enum values; existing appearance, language and integration files remain compatible.
+
+Cmd-hover underlines HTTP/HTTPS links and shows their destination; Cmd-click opens the system default browser. Right-click offers Copy link address; use Shift-right-click when the terminal application captures mouse input. OSC 8 destinations take priority over visible text; plain URLs support localhost and wrapped rows. Plain text without wrap metadata uses contiguous full-width rows, so an exact-edge hard newline is ambiguous. Normal selection is preserved, and a drag or changed frame cancels link activation.
 
 ## Herdr integration
 
-The Herdr button enables local companion following. Settings → Integrations controls the source socket and whether a separate Herdr window opens automatically. The child window paints the daemon's cell surface and leaves daemon-owned terminals running when detached. Local tabs remain real MonoTerm PTYs.
+The Herdr button enables local companion following. Settings → Integrations controls the source socket and whether a separate Herdr window opens automatically. The Herdr window paints the daemon's cell surface; local tabs remain real MonoTerm PTYs.
+
+Main, Herdr and Settings windows close independently. Closing the main window terminates its local shells while Herdr keeps its connection, input, output and preferences. Closing Herdr detaches its surface without stopping daemon-owned terminals or local shells. View → Return to local terminals reopens the main window when needed. Disabling follow affects only local companion following; explicitly opening Herdr does not enable it. Source changes reconnect the existing Herdr window in place. Closing the last native window exits MonoTerm, and Cmd-Q exits the whole application.
 
 Following respects manual tab selection, verified process identities, idle-shell checks and connection/input fences. Clicking panes or resizing splits does not pin following. Custom tab titles and icons belong to the tab until it closes.
 
@@ -109,6 +121,8 @@ The Version settings revision passed 118 application tests (one opt-in test igno
 The 0.1.1 release passed 207 application/component tests (one opt-in ignored), strict all-target Clippy, formatting, eight native updater scenarios and Ed25519 signature tests. Focused native checks passed for Neovim local-file images and input scrolling (15), the original-position translucent Zen indicator (25), and viewport cursor visibility (14); all corresponding screenshots were inspected. Option-key GUI behavior remains unverified.
 
 The 0.2.0 release passed 231 application/component tests (one opt-in ignored), strict all-target/all-feature Clippy, formatting, eight native updater scenarios and Ed25519 signature tests. Focused native checks covered the worktree menu (33), sidebar views/tabs (22), WeType composition through metadata updates (12), Dark/Light sidebar colors and spacing (13 each), and inline branch counts at wide/narrow sidebar widths (11); the corresponding screenshots were inspected. The complete live-agent follow regression remains incomplete after a Codex bootstrap timeout. Cross-version download/install/relaunch is not claimed as verified.
+
+The 0.3.0 release passed 246 application/component tests (one opt-in ignored), strict all-target/all-feature Clippy, formatting, eight native updater scenarios, and Ed25519 signature tests. The component patch reproduces all 20 modified source files exactly. Focused native checks covered local shortcuts/preferences (37), Herdr shortcuts/layout (24), Herdr link actions (18), Space rename typing and Pinyin (14), and independent window lifecycles (27); key screenshots were inspected. Local links were also checked through an actual browser request. Full cross-version update installation and system-theme switching remain unverified.
 
 Native GUI checks require a logged-in, unlocked macOS desktop and Accessibility/Screen Recording access. Use separate test-owned windows and configurations. Never restart an existing user terminal as part of verification. Existing upstream Rust future-compatibility warnings may still appear.
 

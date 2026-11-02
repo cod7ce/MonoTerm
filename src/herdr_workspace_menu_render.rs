@@ -398,7 +398,16 @@ impl HerdrWindow {
                         .bg(rgba(0x00000048))
                 })
                 .capture_key_down(cx.listener(Self::workspace_menu_key_down))
-                .on_key_down(|_, _, cx| cx.stop_propagation())
+                .on_key_down(cx.listener(|view, _, window, cx| {
+                    // Native text insertion follows key dispatch; stopping it here eats typing.
+                    let editing = view.workspace_menu.as_ref().is_some_and(|menu| {
+                        menu.input()
+                            .is_some_and(|input| input.read(cx).is_focused(window))
+                    });
+                    if !editing {
+                        cx.stop_propagation();
+                    }
+                }))
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |view, _, window, cx| {

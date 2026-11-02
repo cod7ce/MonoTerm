@@ -102,6 +102,11 @@ impl Language {
         if let Some(translated) = chinese(english) {
             return translated.to_owned();
         }
+        if let Some(family) = english.strip_prefix("Font \"").and_then(|text| {
+            text.strip_suffix("\" is not installed. Using Menlo; your chosen font is kept.")
+        }) {
+            return format!("未安装字体“{family}”，暂用 Menlo；已保留所选字体。");
+        }
         for (prefix, translated) in [
             ("Running · PID ", "运行中 · PID "),
             ("Disconnected · ", "已断开 · "),
@@ -242,6 +247,54 @@ fn chinese(english: &str) -> Option<&'static str> {
         "Apply transparency to the shell and its toolbar." => "将透明度应用到 Shell 及其工具栏。",
         "Dismiss" => "关闭提示",
         "Light mode keeps surfaces opaque." => "浅色模式下背景保持不透明。",
+        "Search installed fonts…" => "搜索已安装字体…",
+        "Main window sidebar" => "主窗体侧栏",
+        "Saved for this window; Herdr keeps its own sidebar preference." => {
+            "保存此窗口的设置；Herdr 的侧栏设置独立保存。"
+        }
+        "Saved for the main window · hide chrome and focus on the terminal." => {
+            "保存主窗体设置 · 隐藏界面控件，专注于终端。"
+        }
+        "Saved for all local and Herdr panes." => "保存并应用到所有本地和 Herdr 窗格。",
+        "Show all fonts" => "显示全部字体",
+        "All installed fonts · proportional fonts may not align terminal columns." => {
+            "全部已安装字体 · 非等宽字体可能无法对齐终端列。"
+        }
+        "Monospace fonts · turn on Show all fonts to choose any installed family." => {
+            "等宽字体 · 开启“显示全部字体”可选择任意已安装字体。"
+        }
+        "No matching fonts. Try another search or show all fonts." => {
+            "没有匹配的字体。请更换关键词或显示全部字体。"
+        }
+        "LIVE PREVIEW" => "实时预览",
+        "Hover or use ↑/↓ to preview. Click or press Enter to select." => {
+            "悬停或使用 ↑/↓ 预览，单击或按 Enter 选择。"
+        }
+        "10–28 px · default 14 px" => "10–28 px · 默认 14 px",
+        "Reset to 14 px" => "重置为 14 px",
+        "Font family and size are saved automatically. Nerd Font, CJK, and emoji fallbacks are retained." => {
+            "字体和字号自动保存，并保留 Nerd Font、中日韩文字及表情符号的后备字体。"
+        }
+        "Shared shortcuts work in both main and Herdr windows." => {
+            "通用快捷键在主窗体和 Herdr 窗体均可使用。"
+        }
+        "Tabs & panes · both windows" => "标签页与窗格 · 两个窗口通用",
+        "Select tab 1–9 by index" => "切换到第 1–9 个标签页",
+        "Previous / next pane" => "上一个 / 下一个窗格",
+        "Previous / next pane (aliases)" => "上一个 / 下一个窗格（兼容快捷键）",
+        "⌘9 selects tab 9. An index with no tab does nothing." => {
+            "⌘9 切换到第 9 个标签页；对应标签页不存在时不执行操作。"
+        }
+        "View & editing · both windows" => "视图与编辑 · 两个窗口通用",
+        "Reset font size to 14 px" => "字号重置为 14 px",
+        "Herdr window" => "Herdr 窗体",
+        "Previous / next agent" => "上一个 / 下一个 Agent",
+        "Main window only" => "仅主窗体",
+        "Next Tab" => "下一个标签页",
+        "Previous Tab" => "上一个标签页",
+        "Next Agent" => "下一个 Agent",
+        "Previous Agent" => "上一个 Agent",
+        "Copy link address" => "复制链接地址",
         "Tab sidebar" => "标签页侧边栏",
         "This session · shown when the window has room." => "仅本次会话 · 窗口宽度足够时显示。",
         "Zen mode" => "禅模式",

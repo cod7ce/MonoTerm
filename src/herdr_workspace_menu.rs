@@ -243,6 +243,7 @@ impl HerdrWindow {
                 {
                     self.collapsed_repos.insert(key);
                 }
+                self.save_layout(cx);
                 self.dismiss_workspace_menu(window, cx);
             }
         }
@@ -316,6 +317,7 @@ impl HerdrWindow {
             if let Some(tree) = &menu.target.workspace.worktree {
                 self.collapsed_repos.remove(&tree.key);
             }
+            self.save_layout(cx);
             self.dismiss_workspace_menu(window, cx);
             return;
         }

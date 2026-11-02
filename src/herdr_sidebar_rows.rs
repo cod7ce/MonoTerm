@@ -423,7 +423,7 @@ impl gpui::Render for RowTooltip {
     }
 }
 
-pub(super) fn agents(snapshot: &ClientShellSnapshot) -> Vec<&ClientShellAgent> {
+pub(in crate::herdr_view) fn agents(snapshot: &ClientShellSnapshot) -> Vec<&ClientShellAgent> {
     // A named plugin view owns both filtering and order, including an empty list.
     if snapshot.agent_view_label.is_some() {
         snapshot

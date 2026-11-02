@@ -9,7 +9,7 @@ use crate::{
 use gpui::{Context, Div, MouseButton, SharedString, Window, div, prelude::*, px, rgb, rgba};
 
 #[path = "herdr_sidebar_rows.rs"]
-mod rows;
+pub(super) mod rows;
 #[path = "herdr_workspaces.rs"]
 mod workspaces;
 use rows::Row;
@@ -23,6 +23,7 @@ impl HerdrWindow {
     pub(super) fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
         self.sidebar_visible = !self.sidebar_visible;
         self.sidebar_drag = None;
+        self.save_layout(cx);
         cx.notify();
     }
 
@@ -110,6 +111,7 @@ impl HerdrWindow {
                                     if !view.collapsed_repos.remove(&key) {
                                         view.collapsed_repos.insert(key.clone());
                                     }
+                                    view.save_layout(cx);
                                     view.focus_handle.focus(window, cx);
                                     cx.notify();
                                 }))

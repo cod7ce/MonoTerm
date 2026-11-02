@@ -18,46 +18,34 @@ use std::path::Path;
 
 impl TerminalApp {
     pub(crate) fn start_follow(&mut self, cx: &mut Context<Self>) {
-        self.stop_herdr(cx);
+        self.follow_generation = self.follow_generation.wrapping_add(1);
+        self.follow_observer = None;
+        self.follow_snapshot = None;
         if !self.follow_settings.enabled {
             self.follow_status = "Off".into();
             return;
         }
         let source = self.follow_settings.socket_path();
         self.follow_controller.set_source(&source);
-        self.follow_observer = match herdr::Client::start(source.clone()) {
-            Ok(observer) => Some(observer),
+        self.follow_observer = match herdr::Client::start(source) {
+            Ok(observer) => {
+                self.follow_status = "Connecting…".into();
+                Some(observer)
+            }
             Err(error) => {
                 self.follow_status = error;
                 None
             }
         };
-        match HerdrConnection::open(&source, false) {
-            Ok(connection) => {
-                if self.follow_observer.is_some() {
-                    self.follow_status = "Connecting…".into();
-                }
-                self.herdr_connection = Some(cx.new(|_| connection));
-            }
-            Err(error) => self.follow_status = error,
-        }
+        self.ensure_herdr_connection(cx);
     }
 
-    fn stop_herdr(&mut self, cx: &mut Context<Self>) {
-        self.follow_generation = self.follow_generation.wrapping_add(1);
-        self.follow_observer = None;
-        self.follow_snapshot = None;
-        if let Some(connection) = self.herdr_connection.take() {
-            connection.update(cx, |connection, cx| {
-                let _ = connection.set_surface_active(false);
-                connection.disconnect();
-                cx.notify();
-            });
-        }
-        if let Some(child) = self.herdr_window.take() {
-            cx.defer(move |cx| {
-                let _ = child.update(cx, |_, window, _| window.remove_window());
-            });
+    fn ensure_herdr_connection(&mut self, cx: &mut Context<Self>) {
+        if self.herdr_connection.is_none() {
+            match HerdrConnection::open(&self.follow_settings.socket_path(), false) {
+                Ok(connection) => self.herdr_connection = Some(cx.new(|_| connection)),
+                Err(error) => self.follow_status = error,
+            }
         }
     }
 
@@ -79,12 +67,7 @@ impl TerminalApp {
         }
     }
 
-    pub(crate) fn set_follow_source(
-        &mut self,
-        path: Option<String>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn set_follow_source(&mut self, path: Option<String>, cx: &mut Context<Self>) {
         if path
             .as_ref()
             .is_some_and(|path| !Path::new(path).is_absolute() || path.contains('\0'))
@@ -93,15 +76,31 @@ impl TerminalApp {
             cx.notify();
             return;
         }
-        let reopen = self
-            .herdr_window
-            .is_some_and(|child| child.read(cx).is_ok());
+        let source = path.clone().unwrap_or_else(|| {
+            let mut settings = self.follow_settings.clone();
+            settings.socket_path = None;
+            settings.socket_path()
+        });
+        if let Err(error) = crate::herdr_connection::client_socket_path(&source) {
+            self.follow_status = error;
+            cx.notify();
+            return;
+        }
         self.follow_settings.socket_path = path;
+        if let Some(connection) = &self.herdr_connection {
+            let result = connection.update(cx, |connection, cx| {
+                let result = connection.set_source(&source);
+                cx.notify();
+                result
+            });
+            if let Err(error) = result {
+                self.follow_status = error;
+                cx.notify();
+                return;
+            }
+        }
         self.start_follow(cx);
         self.save_follow(cx);
-        if reopen && self.follow_settings.enabled {
-            self.open_herdr_window(window, cx);
-        }
     }
 
     pub(crate) fn follow_herdr(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -119,7 +118,10 @@ impl TerminalApp {
         }
         self.follow_controller.resume();
         self.dragging = None;
-        self.pump_follow(window, cx);
+        if self.main_window.is_some() {
+            self.poll_herdr(cx);
+            self.pump_follow(window, cx);
+        }
         // Clicking the header control moves keyboard focus off the terminal view.
         if let Some(session) = self.active_session() {
             session.focus(window, cx);
@@ -129,6 +131,10 @@ impl TerminalApp {
 
     pub(crate) fn return_local(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.follow_controller.pin();
+        if self.main_window.is_none() {
+            cx.notify();
+            return;
+        }
         window.activate_window();
         if self.tabs.is_empty() {
             self.new_session(window, cx);
@@ -144,7 +150,7 @@ impl TerminalApp {
         }
     }
 
-    pub(crate) fn pump_follow(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn poll_herdr(&mut self, cx: &mut Context<Self>) {
         if let Some(connection) = &self.herdr_connection {
             connection.update(cx, |connection, cx| {
                 if connection.poll() {
@@ -182,6 +188,9 @@ impl TerminalApp {
             }
             cx.notify();
         }
+    }
+
+    pub(crate) fn pump_follow(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let actions = self.follow_controller.evaluate(
             self.follow_snapshot.as_ref(),
             window.is_window_active(),
@@ -220,7 +229,7 @@ impl TerminalApp {
             id,
             &self.shell,
             &target.directory,
-            self.typography.font_family.font(),
+            self.typography.font(),
             cx,
         );
         if let Some(view) = &session.view {
@@ -314,20 +323,12 @@ impl TerminalApp {
     }
 
     pub(crate) fn open_herdr_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.follow_settings.enabled {
-            self.resume_follow(window, cx);
-        }
-        if self.herdr_connection.is_none() {
-            self.start_follow(cx);
-        }
+        self.ensure_herdr_connection(cx);
         let Some(connection) = self.herdr_connection.clone() else {
             cx.notify();
             return;
         };
-        let owner = window
-            .window_handle()
-            .downcast::<Self>()
-            .expect("terminal window root");
+        let owner = cx.entity();
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
                 window.display(cx).map(|display| display.id()),
@@ -345,23 +346,21 @@ impl TerminalApp {
         };
         // Opening a window draws synchronously; release the main entity first.
         cx.defer(move |cx| {
-            let Ok(preferences) = owner.read_with(cx, |root, _| {
+            let preferences = owner.read_with(cx, |root, _| {
                 (
-                    root.follow_settings.enabled,
                     root.herdr_connection.clone(),
                     root.herdr_window,
-                    root.typography.font_family.font(),
+                    root.typography.font(),
                     root.font_size,
                     root.palette,
                     root.appearance.blur_radius,
                     root.language,
+                    root.window_preferences.herdr.clone(),
                 )
-            }) else {
-                return;
-            };
-            let (enabled, current, existing, font, font_size, palette, blur_radius, language) =
+            });
+            let (current, existing, font, font_size, palette, blur_radius, language, layout) =
                 preferences;
-            if !enabled || current.as_ref() != Some(&connection) {
+            if current.as_ref() != Some(&connection) {
                 return;
             }
             if let Some(child) = existing
@@ -375,18 +374,19 @@ impl TerminalApp {
                 cx.new(|cx| {
                     HerdrWindow::new(
                         connection,
-                        owner,
+                        owner.clone(),
                         font,
                         font_size,
                         palette,
                         blur_radius,
                         language,
+                        layout,
                         window,
                         cx,
                     )
                 })
             });
-            let _ = owner.update(cx, |root, _, cx| {
+            owner.update(cx, |root, cx| {
                 match result {
                     Ok(child) => root.herdr_window = Some(child),
                     Err(error) => root.follow_status = format!("Open Herdr window: {error}"),
@@ -397,23 +397,14 @@ impl TerminalApp {
     }
 
     pub(crate) fn reconnect_herdr(&mut self, cx: &mut Context<Self>) {
-        if !self.follow_settings.enabled {
-            return;
-        }
-        self.follow_generation = self.follow_generation.wrapping_add(1);
-        self.follow_snapshot = None;
-        self.follow_observer = None;
-        match herdr::Client::start(self.follow_settings.socket_path()) {
-            Ok(observer) => self.follow_observer = Some(observer),
-            Err(error) => self.follow_status = error,
-        }
+        self.start_follow(cx);
         if let Some(connection) = &self.herdr_connection {
             connection.update(cx, |connection, cx| {
                 connection.reconnect();
                 cx.notify();
             });
         } else {
-            self.start_follow(cx);
+            self.ensure_herdr_connection(cx);
         }
         cx.notify();
     }
@@ -422,7 +413,7 @@ impl TerminalApp {
         let Some(child) = self.herdr_window else {
             return;
         };
-        let font = self.typography.font_family.font();
+        let font = self.typography.font();
         let font_size = self.font_size;
         let palette = self.palette;
         let blur_radius = self.appearance.blur_radius;
@@ -444,7 +435,8 @@ impl TerminalApp {
             self.root_focus.focus(window, cx);
             cx.notify();
         } else {
-            cx.quit();
+            self.close_main(cx);
+            window.remove_window();
         }
     }
 

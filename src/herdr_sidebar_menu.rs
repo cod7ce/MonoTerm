@@ -1,27 +1,9 @@
-//! Session-local choices for the Herdr sidebar's visible sections.
+//! Persisted choices for the Herdr sidebar's visible sections.
 use super::HerdrWindow;
 use crate::{ui, window_chrome};
 use gpui::{AnyElement, Context, FocusHandle, MouseButton, Window, div, prelude::*, px, rgb, rgba};
 
-#[derive(Clone, Copy, Default, PartialEq, Eq)]
-pub(super) enum SidebarView {
-    Spaces,
-    Agents,
-    #[default]
-    Both,
-}
-
-impl SidebarView {
-    pub(super) fn spaces(self) -> bool {
-        self != Self::Agents
-    }
-    pub(super) fn agents(self) -> bool {
-        self != Self::Spaces
-    }
-    pub(super) fn both(self) -> bool {
-        self == Self::Both
-    }
-}
+pub(super) use crate::window_preferences::SidebarView;
 
 const VIEWS: [(SidebarView, &str); 3] = [
     (SidebarView::Spaces, "Spaces"),
@@ -119,6 +101,7 @@ impl HerdrWindow {
                         window_view.sidebar_view = view;
                         window_view.sidebar_visible = true;
                         window_view.sidebar_drag = None;
+                        window_view.save_layout(cx);
                         window_view.dismiss_sidebar_menu(window, cx);
                     })),
             );

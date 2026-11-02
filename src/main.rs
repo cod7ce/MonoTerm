@@ -20,6 +20,7 @@ mod typography;
 mod ui;
 mod updates;
 mod window_chrome;
+mod window_preferences;
 mod window_style;
 
 use appearance::{Appearance, Palette};
@@ -60,12 +61,20 @@ actions!(
         SplitDown,
         NextPane,
         PreviousPane,
+        NextAgent,
+        PreviousAgent,
         ToggleZen,
         ResumeFollow,
         ReturnLocal,
         OpenHerdrWindow
     ]
 );
+
+#[derive(Clone, Debug, Default, PartialEq, serde::Deserialize, gpui::Action)]
+#[action(namespace = terminal, no_json)]
+struct SelectTab {
+    index: usize,
+}
 
 use window_chrome::{SHELL_INSET, SHELL_RADIUS, TOOLBAR_CENTER, TOOLBAR_HEIGHT};
 
@@ -80,10 +89,12 @@ struct TerminalApp {
     shell: String,
     font_size: f32,
     typography: typography::Typography,
+    window_preferences: window_preferences::WindowPreferences,
     language: locale::Language,
     sidebar: bool,
     sidebar_width: f32,
     resizing_sidebar: bool,
+    main_window: Option<gpui::WindowHandle<Self>>,
     settings_window: Option<gpui::WindowHandle<settings::SettingsWindow>>,
     updater: gpui::Entity<updates::Updater>,
     tab_menu: Option<(usize, gpui::Point<Pixels>)>,
@@ -117,13 +128,20 @@ struct TerminalApp {
 
 impl TerminalApp {
     fn new(directory: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let output_task = cx.spawn_in(window, async move |root, cx| {
+        Self::register_main_close(window, cx);
+        let output_task = cx.spawn(async move |root, cx| {
             loop {
                 cx.background_executor()
                     .timer(Duration::from_millis(16))
                     .await;
-                if root
-                    .update_in(cx, |root, window, cx| {
+                let Ok(main_window) = root.update(cx, |root, cx| {
+                    root.poll_herdr(cx);
+                    root.main_window
+                }) else {
+                    break;
+                };
+                if let Some(main_window) = main_window {
+                    let result = main_window.update(cx, |root, window, cx| {
                         root.pump_follow(window, cx);
                         let mut changed = false;
                         let mut exited = Vec::new();
@@ -142,10 +160,13 @@ impl TerminalApp {
                         if changed {
                             cx.notify();
                         }
-                    })
-                    .is_err()
-                {
-                    break;
+                    });
+                    if let Err(error) = result {
+                        eprintln!("Poll terminal window: {error}");
+                        if root.update(cx, |root, cx| root.close_main(cx)).is_err() {
+                            break;
+                        }
+                    }
                 }
             }
         });
@@ -163,6 +184,8 @@ impl TerminalApp {
         let (appearance, notice) = Appearance::load();
         let (language, language_notice) = locale::Language::load();
         let (typography, typography_notice) = typography::Typography::load();
+        let typography_notice = typography_notice.or_else(|| typography.missing_font_notice());
+        let (window_preferences, window_notice) = window_preferences::WindowPreferences::load();
         set_menus(language, cx);
         let (follow_settings, follow_notice) = follow::FollowSettings::load();
         let palette = appearance.palette(Self::system_dark(window));
@@ -188,12 +211,13 @@ impl TerminalApp {
             default_directory: directory.clone(),
             directory,
             shell,
-            font_size: 15.0,
+            font_size: typography.font_size,
             typography,
             language,
-            sidebar: true,
-            sidebar_width: window_chrome::SIDEBAR_WIDTH,
+            sidebar: window_preferences.main.visible,
+            sidebar_width: window_preferences.main.width,
             resizing_sidebar: false,
+            main_window: window.window_handle().downcast::<Self>(),
             settings_window: None,
             updater,
             tab_menu: None,
@@ -209,7 +233,11 @@ impl TerminalApp {
             split_bounds: HashMap::new(),
             dragging: None,
             notice: None,
-            appearance_notice: notice.or(language_notice).or(typography_notice),
+            appearance_notice: notice
+                .or(language_notice)
+                .or(typography_notice)
+                .or(window_notice),
+            window_preferences,
             follow_controller: follow::Controller::default(),
             follow_observer: None,
             follow_snapshot: None,
@@ -229,12 +257,86 @@ impl TerminalApp {
         } else {
             root.root_focus.focus(window, cx);
         }
+        if root.window_preferences.main.zen {
+            match window_style::set_zen(window, true) {
+                Ok(()) => root.zen = true,
+                Err(error) => root.notice = Some(error),
+            }
+        }
         root.start_follow(cx);
         root.apply_appearance(window, cx, false);
         if root.follow_settings.enabled && root.follow_settings.open_herdr_window {
             root.open_herdr_window(window, cx);
         }
         root
+    }
+
+    fn register_main_close(window: &mut Window, cx: &mut Context<Self>) {
+        let entity = cx.weak_entity();
+        window.on_window_should_close(cx, move |_, cx| {
+            if let Err(error) = entity.update(cx, |root, cx| root.close_main(cx)) {
+                eprintln!("Close terminal window: {error}");
+            }
+            true
+        });
+    }
+
+    fn close_main(&mut self, cx: &mut Context<Self>) {
+        self.main_window = None;
+        self.follow_generation = self.follow_generation.wrapping_add(1);
+        self.follow_controller.pin();
+        for tab in self.tabs.drain(..) {
+            self.follow_controller.close_tab(tab.id);
+        }
+        for session in self.sessions.drain(..) {
+            session.retire();
+        }
+        self.active = 0;
+        self.tab_menu = None;
+        self.tab_editor = None;
+        self.tab_editor_subscription = None;
+        self.resizing_sidebar = false;
+        self.dragging = None;
+        self.split_bounds.clear();
+        self.retiring_companions.clear();
+        cx.notify();
+    }
+
+    fn show_main(entity: gpui::Entity<Self>, cx: &mut App) {
+        cx.defer(move |cx| {
+            if let Some(main) = entity.read(cx).main_window {
+                if let Err(error) =
+                    main.update(cx, |root, window, cx| root.return_local(window, cx))
+                {
+                    eprintln!("Focus terminal window: {error}");
+                }
+                return;
+            }
+            let root = entity.clone();
+            if let Err(error) = cx.open_window(main_window_options(cx), move |window, cx| {
+                root.update(cx, |root, cx| {
+                    root.main_window = window.window_handle().downcast::<Self>();
+                    Self::register_main_close(window, cx);
+                    root._appearance_subscription =
+                        cx.observe_window_appearance(window, |root, window, cx| {
+                            root.apply_appearance(window, cx, false);
+                        });
+                    root.toast = toast::new(window, root.palette, cx);
+                    if let Err(error) = window_style::set_zen(window, root.zen) {
+                        root.notice = Some(error);
+                    }
+                    root.apply_appearance(window, cx, false);
+                    root.return_local(window, cx);
+                });
+                root
+            }) {
+                entity.update(cx, |root, cx| {
+                    root.main_window = None;
+                    root.appearance_notice = Some(format!("Open terminal window: {error}"));
+                    cx.notify();
+                });
+            }
+        });
     }
 
     fn system_dark(window: &Window) -> bool {
@@ -249,7 +351,26 @@ impl TerminalApp {
         self.sessions.iter().find(|s| s.id == id)
     }
 
+    fn prepare_terminal_action(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.tab_menu.is_some() || self.tab_editor.is_some() {
+            return false;
+        }
+        if let Some(view) = self
+            .active_session()
+            .and_then(|session| session.view.clone())
+        {
+            if view.read(cx).is_composing() || view.read(cx).link_menu_open() {
+                return false;
+            }
+            view.update(cx, |view, _| view.cancel_link_interaction());
+        }
+        true
+    }
+
     fn new_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.prepare_terminal_action(cx) {
+            return;
+        }
         let directory = self
             .active_session()
             .map(|session| &session.directory)
@@ -273,7 +394,7 @@ impl TerminalApp {
             id,
             &self.shell,
             &directory,
-            self.typography.font_family.font(),
+            self.typography.font(),
             cx,
         ));
         let previous = self.tabs.get(self.active).map(|tab| tab.id);
@@ -283,6 +404,9 @@ impl TerminalApp {
     }
 
     fn select(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.prepare_terminal_action(cx) {
+            return;
+        }
         self.select_content(index, true, window, cx);
     }
 
@@ -330,6 +454,9 @@ impl TerminalApp {
     }
 
     fn split(&mut self, axis: Axis, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.prepare_terminal_action(cx) {
+            return;
+        }
         self.mark_local_edit();
         let Some(tab) = self.tabs.get_mut(self.active) else {
             return;
@@ -346,7 +473,7 @@ impl TerminalApp {
                 id,
                 &self.shell,
                 &self.directory,
-                self.typography.font_family.font(),
+                self.typography.font(),
                 cx,
             ));
             self.focus_pane(id, window, cx);
@@ -354,6 +481,9 @@ impl TerminalApp {
     }
 
     fn close_pane(&mut self, id: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.prepare_terminal_action(cx) {
+            return;
+        }
         self.remove_pane(id, true, window, cx);
     }
 
@@ -414,6 +544,9 @@ impl TerminalApp {
     }
 
     fn close(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.prepare_terminal_action(cx) {
+            return;
+        }
         if index >= self.tabs.len() {
             return;
         }
@@ -452,6 +585,9 @@ impl TerminalApp {
     }
 
     fn cycle_pane(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.prepare_terminal_action(cx) {
+            return;
+        }
         if let Some(tab) = self.tabs.get_mut(self.active) {
             let id = tab.cycle_focus(forward);
             self.focus_pane(id, window, cx);
@@ -459,6 +595,9 @@ impl TerminalApp {
     }
 
     fn restart(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.prepare_terminal_action(cx) {
+            return;
+        }
         self.mark_local_edit();
         let Some(id) = self.tabs.get(self.active).map(|t| t.active_pane) else {
             return;
@@ -471,10 +610,16 @@ impl TerminalApp {
     }
 
     fn toggle_zen(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.main_window.is_none() {
+            self.zen = !self.zen;
+            self.save_layout(cx);
+            return;
+        }
         match window_style::set_zen(window, !self.zen) {
             Ok(()) => {
                 self.zen = !self.zen;
                 self.dragging = None;
+                self.save_layout(cx);
                 if !self.zen {
                     // Unhiding AppKit buttons can reset their frames. Updating the
                     // title makes GPUI reapply the configured traffic-light position.
@@ -489,8 +634,31 @@ impl TerminalApp {
         cx.notify();
     }
 
+    fn save_layout(&mut self, cx: &mut Context<Self>) {
+        self.window_preferences.main = window_preferences::MainPreferences {
+            visible: self.sidebar,
+            width: self.sidebar_width,
+            zen: self.zen,
+        };
+        if let Err(error) = self.window_preferences.save() {
+            self.appearance_notice = Some(error);
+        }
+        cx.notify();
+    }
+
+    fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
+        self.sidebar = !self.sidebar;
+        self.resizing_sidebar = false;
+        self.save_layout(cx);
+    }
+
     fn adjust_font(&mut self, delta: f32, cx: &mut Context<Self>) {
-        self.font_size = (self.font_size + delta).clamp(10.0, 28.0);
+        self.typography.font_size = self.font_size + delta;
+        self.typography.clamp();
+        self.font_size = self.typography.font_size;
+        if let Err(error) = self.typography.save() {
+            self.appearance_notice = Some(error);
+        }
         self.sync_herdr_preferences(cx);
         cx.notify();
     }
@@ -503,7 +671,7 @@ impl TerminalApp {
         cx: &mut Context<Self>,
     ) {
         let mut style = window.text_style();
-        let font = self.typography.font_family.font();
+        let font = self.typography.font();
         style.font_family = font.family;
         style.font_fallbacks = font.fallbacks;
         style.font_features = font.features;
@@ -565,11 +733,17 @@ impl TerminalApp {
         self.language.text(text)
     }
 
-    fn set_font_family(&mut self, family: typography::FontFamily, cx: &mut Context<Self>) {
+    fn set_font_family(&mut self, family: String, cx: &mut Context<Self>) {
         self.typography.font_family = family;
-        self.appearance_notice = self.typography.save().err();
+        self.typography.clamp();
+        self.appearance_notice = self
+            .typography
+            .save()
+            .err()
+            .or_else(|| self.typography.missing_font_notice());
+        let font = self.typography.font();
         for session in &mut self.sessions {
-            session.set_font(family.font(), cx);
+            session.set_font(font.clone(), cx);
         }
         self.sync_herdr_preferences(cx);
         cx.notify();
@@ -662,7 +836,7 @@ impl TerminalApp {
                         self.sidebar,
                     )
                     .on_click(cx.listener(|root, _, window, cx| {
-                        root.sidebar = !root.sidebar;
+                        root.toggle_sidebar(cx);
                         if let Some(session) = root.active_session() {
                             session.focus(window, cx);
                         }
@@ -996,6 +1170,7 @@ impl TerminalApp {
             );
         }
         div()
+            .font(self.typography.font())
             .w(px(width - 4.0))
             .h_full()
             .flex_shrink_0()
@@ -1306,10 +1481,8 @@ impl TerminalApp {
     }
 
     fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let owner = window
-            .window_handle()
-            .downcast::<Self>()
-            .expect("terminal window root");
+        let owner = cx.entity();
+        let origin = window.window_handle();
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
                 window.display(cx).map(|display| display.id()),
@@ -1327,9 +1500,7 @@ impl TerminalApp {
         };
         // Opening a GPUI window draws it synchronously; release the owner first.
         cx.defer(move |cx| {
-            let Ok(existing) = owner.read_with(cx, |root, _| root.settings_window) else {
-                return;
-            };
+            let existing = owner.read(cx).settings_window;
             if let Some(settings) = existing
                 && settings
                     .update(cx, |settings, window, cx| settings.focus(window, cx))
@@ -1337,15 +1508,21 @@ impl TerminalApp {
             {
                 return;
             }
-            let Ok(entity) = owner.entity(cx) else { return };
-            let snapshot = settings::SettingsSnapshot::from(entity.read(cx));
-            let updater = entity.read(cx).updater.clone();
+            let snapshot = settings::SettingsSnapshot::from(owner.read(cx));
+            let updater = owner.read(cx).updater.clone();
             let result = cx.open_window(options, |window, cx| {
                 cx.new(|cx| {
-                    settings::SettingsWindow::new(owner, entity, snapshot, updater, window, cx)
+                    settings::SettingsWindow::new(
+                        owner.clone(),
+                        origin,
+                        snapshot,
+                        updater,
+                        window,
+                        cx,
+                    )
                 })
             });
-            let _ = owner.update(cx, |root, _, cx| {
+            owner.update(cx, |root, cx| {
                 match result {
                     Ok(settings) => root.settings_window = Some(settings),
                     Err(error) => root.notice = Some(format!("Open settings: {error}")),
@@ -1411,8 +1588,8 @@ impl Render for TerminalApp {
         } else {
             self.sidebar_width
         };
-        if !show_sidebar {
-            self.resizing_sidebar = false;
+        if !show_sidebar && std::mem::take(&mut self.resizing_sidebar) {
+            self.save_layout(cx);
         }
         let p = self.palette;
         let shell_left = if show_sidebar {
@@ -1472,6 +1649,9 @@ impl Render for TerminalApp {
             .on_action(
                 cx.listener(|root, _: &CloseTab, window, cx| root.close(root.active, window, cx)),
             )
+            .on_action(cx.listener(|root, action: &SelectTab, window, cx| {
+                root.select(action.index, window, cx);
+            }))
             .on_action(cx.listener(|root, _: &Restart, window, cx| root.restart(window, cx)))
             .on_action(
                 cx.listener(|root, _: &NextSession, window, cx| root.cycle(true, window, cx)),
@@ -1504,18 +1684,35 @@ impl Render for TerminalApp {
             .on_action(cx.listener(|root, _: &OpenHerdrWindow, window, cx| {
                 root.open_herdr_window(window, cx)
             }))
-            .on_action(cx.listener(|root, _: &ToggleZen, window, cx| root.toggle_zen(window, cx)))
-            .on_action(cx.listener(|root, _: &IncreaseFont, _, cx| root.adjust_font(1.0, cx)))
-            .on_action(cx.listener(|root, _: &DecreaseFont, _, cx| root.adjust_font(-1.0, cx)))
+            .on_action(cx.listener(|root, _: &ToggleZen, window, cx| {
+                if root.prepare_terminal_action(cx) {
+                    root.toggle_zen(window, cx);
+                }
+            }))
+            .on_action(cx.listener(|root, _: &IncreaseFont, _, cx| {
+                if root.prepare_terminal_action(cx) {
+                    root.adjust_font(1.0, cx);
+                }
+            }))
+            .on_action(cx.listener(|root, _: &DecreaseFont, _, cx| {
+                if root.prepare_terminal_action(cx) {
+                    root.adjust_font(-1.0, cx);
+                }
+            }))
             .on_action(cx.listener(|root, _: &ResetFont, _, cx| {
-                root.adjust_font(15.0 - root.font_size, cx);
+                if root.prepare_terminal_action(cx) {
+                    root.adjust_font(typography::DEFAULT_FONT_SIZE - root.font_size, cx);
+                }
             }))
             .on_action(cx.listener(|root, _: &ToggleSidebar, _, cx| {
-                root.sidebar = !root.sidebar;
-                cx.notify();
+                if root.prepare_terminal_action(cx) {
+                    root.toggle_sidebar(cx);
+                }
             }))
             .on_action(cx.listener(|root, _: &ToggleSettings, window, cx| {
-                root.open_settings(window, cx);
+                if root.prepare_terminal_action(cx) {
+                    root.open_settings(window, cx);
+                }
             }))
             .on_action(cx.listener(|root, _: &CustomizeTab, window, cx| {
                 if let Some(tab) = root.tabs.get(root.active) {
@@ -1542,6 +1739,7 @@ impl Render for TerminalApp {
                     if root.resizing_sidebar {
                         if event.pressed_button != Some(MouseButton::Left) {
                             root.resizing_sidebar = false;
+                            root.save_layout(cx);
                             return;
                         }
                         let maximum =
@@ -1578,6 +1776,9 @@ impl Render for TerminalApp {
             )
             .capture_any_mouse_up(cx.listener(|root, _, _, cx| {
                 let sidebar_changed = std::mem::take(&mut root.resizing_sidebar);
+                if sidebar_changed {
+                    root.save_layout(cx);
+                }
                 if root.dragging.take().is_some() || sidebar_changed {
                     cx.notify();
                 }
@@ -1749,6 +1950,10 @@ fn set_menus(language: locale::Language, cx: &mut App) {
                 MenuItem::action(t("Split Down"), SplitDown),
                 MenuItem::action(t("Next Pane"), NextPane),
                 MenuItem::action(t("Previous Pane"), PreviousPane),
+                MenuItem::action(t("Next Tab"), NextSession),
+                MenuItem::action(t("Previous Tab"), PreviousSession),
+                MenuItem::action(t("Next Agent"), NextAgent),
+                MenuItem::action(t("Previous Agent"), PreviousAgent),
                 MenuItem::separator(),
                 MenuItem::action(t("Toggle Zen Mode"), ToggleZen),
                 MenuItem::action(t("Toggle Sidebar"), ToggleSidebar),
@@ -1762,6 +1967,24 @@ fn set_menus(language: locale::Language, cx: &mut App) {
             ],
         },
     ]);
+}
+
+fn main_window_options(cx: &App) -> WindowOptions {
+    WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
+            None,
+            size(px(1200.0), px(780.0)),
+            cx,
+        ))),
+        titlebar: Some(TitlebarOptions {
+            title: Some("MonoTerm".into()),
+            appears_transparent: true,
+            traffic_light_position: Some(point(px(12.0), px(15.0))),
+        }),
+        window_background: WindowBackgroundAppearance::Blurred,
+        window_min_size: Some(size(px(640.0), px(400.0))),
+        ..Default::default()
+    }
 }
 
 fn main() {
@@ -1802,6 +2025,10 @@ fn main() {
                 KeyBinding::new("escape", settings::CloseSettings, Some("Settings")),
                 KeyBinding::new("cmd-d", SplitRight, None),
                 KeyBinding::new("cmd-shift-d", SplitDown, None),
+                KeyBinding::new("cmd-]", NextPane, None),
+                KeyBinding::new("cmd-[", PreviousPane, None),
+                KeyBinding::new("cmd-shift-]", NextAgent, Some("HerdrTerminal")),
+                KeyBinding::new("cmd-shift-[", PreviousAgent, Some("HerdrTerminal")),
                 KeyBinding::new("cmd-alt-right", NextPane, None),
                 KeyBinding::new("cmd-alt-left", PreviousPane, None),
                 KeyBinding::new("cmd-shift-z", ToggleZen, None),
@@ -1814,28 +2041,10 @@ fn main() {
                 KeyBinding::new("cmd-0", ResetFont, None),
                 KeyBinding::new("cmd-shift-r", Restart, None),
             ]);
-            let options = WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
-                    None,
-                    size(px(1200.0), px(780.0)),
-                    cx,
-                ))),
-                titlebar: Some(TitlebarOptions {
-                    title: Some("MonoTerm".into()),
-                    appears_transparent: true,
-                    // The inset grows downward on this host; 15 puts the native
-                    // buttons on the shell controls' y=22 center.
-                    traffic_light_position: Some(point(px(12.0), px(15.0))),
-                }),
-                window_background: WindowBackgroundAppearance::Blurred,
-                window_min_size: Some(size(px(640.0), px(400.0))),
-                ..Default::default()
-            };
-            match cx.open_window(options, |window, cx| {
-                window.on_window_should_close(cx, |_, cx| {
-                    cx.quit();
-                    false
-                });
+            cx.bind_keys((0..9).map(|index| {
+                KeyBinding::new(&format!("cmd-{}", index + 1), SelectTab { index }, None)
+            }));
+            match cx.open_window(main_window_options(cx), |window, cx| {
                 cx.new(|cx| TerminalApp::new(directory, window, cx))
             }) {
                 Ok(_) => cx.activate(true),

@@ -1,4 +1,7 @@
-use crate::typography::FontFamily;
+use crate::text_input::TextInput;
+use crate::typography::{
+    DEFAULT_FONT_SIZE, MAX_FONT_SIZE, MIN_FONT_SIZE, Typography, filter_fonts, installed_fonts,
+};
 use crate::{
     CloseSession, CloseTab, TerminalApp, ToggleSettings,
     appearance::{Appearance, Palette, Theme},
@@ -7,8 +10,8 @@ use crate::{
 };
 use gpui::{
     App, Bounds, Context, Entity, FocusHandle, Focusable, FontWeight, MouseButton, Pixels, Render,
-    SharedString, Subscription, Window, WindowControlArea, WindowHandle, actions, canvas, div,
-    prelude::*, px, rgb, rgba,
+    ScrollStrategy, SharedString, Subscription, UniformListScrollHandle, Window, WindowControlArea,
+    actions, canvas, div, prelude::*, px, rgb, rgba, uniform_list,
 };
 use std::collections::HashMap;
 
@@ -20,7 +23,7 @@ pub(crate) struct SettingsSnapshot {
     appearance: Appearance,
     palette: Palette,
     font_size: f32,
-    font_family: FontFamily,
+    font_family: String,
     language: Language,
     sidebar: bool,
     zen: bool,
@@ -36,7 +39,7 @@ impl From<&TerminalApp> for SettingsSnapshot {
             appearance: root.appearance,
             palette: root.palette,
             font_size: root.font_size,
-            font_family: root.typography.font_family,
+            font_family: root.typography.font_family.clone(),
             language: root.language,
             sidebar: root.sidebar,
             zen: root.zen,
@@ -58,7 +61,7 @@ enum Category {
     Version,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum Change {
     Language(Language),
     Theme(Theme),
@@ -70,7 +73,8 @@ enum Change {
     Sidebar,
     Zen,
     Font(f32),
-    FontFamily(FontFamily),
+    FontFamily(String),
+    ShowAllFonts,
     ResetFont,
     Defaults,
     Follow,
@@ -117,7 +121,8 @@ impl Slider {
 }
 
 pub(crate) struct SettingsWindow {
-    owner: WindowHandle<TerminalApp>,
+    owner: Entity<TerminalApp>,
+    origin: gpui::AnyWindowHandle,
     snapshot: SettingsSnapshot,
     category: Category,
     focus_handle: FocusHandle,
@@ -126,16 +131,24 @@ pub(crate) struct SettingsWindow {
     applied_material: Option<(f32, u32)>,
     material_error: Option<String>,
     local_feedback: Option<String>,
+    font_search: Entity<TextInput>,
+    font_query: String,
+    show_all_fonts: bool,
+    filtered_fonts: Vec<usize>,
+    preview_family: Option<String>,
+    font_scroll: UniformListScrollHandle,
+    _font_search_observation: Subscription,
     toast: Entity<crate::toast::Toast>,
     updater: Entity<crate::updates::Updater>,
     _updater_observation: Subscription,
     _owner_observation: Subscription,
+    _appearance_observation: Subscription,
 }
 
 impl SettingsWindow {
     pub(crate) fn new(
-        owner: WindowHandle<TerminalApp>,
-        entity: Entity<TerminalApp>,
+        owner: Entity<TerminalApp>,
+        origin: gpui::AnyWindowHandle,
         snapshot: SettingsSnapshot,
         updater: Entity<crate::updates::Updater>,
         window: &mut Window,
@@ -143,21 +156,46 @@ impl SettingsWindow {
     ) -> Self {
         // Start from the supplied snapshot rather than eagerly reading the
         // owner, then refresh only when it notifies us of a preference change.
-        let observation = cx.observe(&entity, |settings, entity, cx| {
+        let observation = cx.observe(&owner, |settings, entity, cx| {
             let snapshot = SettingsSnapshot::from(entity.read(cx));
             if settings.snapshot != snapshot {
+                if settings.snapshot.font_family != snapshot.font_family {
+                    settings.preview_family = None;
+                }
                 settings.snapshot = snapshot;
                 cx.notify();
             }
         });
+        let appearance_observation =
+            cx.observe_window_appearance(window, |settings, window, cx| {
+                settings
+                    .owner
+                    .update(cx, |root, cx| root.apply_appearance(window, cx, false));
+            });
+        let shared = owner.clone();
         window.on_window_should_close(cx, move |_, cx| {
-            refocus_owner(owner, cx);
+            refocus_owner(shared.clone(), origin, cx);
             true
         });
         let toast = crate::toast::new(window, snapshot.palette, cx);
         let updater_observation = cx.observe(&updater, |_, _, cx| cx.notify());
+        let font_search = cx.new(|cx| {
+            TextInput::new(
+                String::new(),
+                snapshot.language.text("Search installed fonts…").into(),
+                cx,
+            )
+        });
+        let font_search_observation = cx.observe(&font_search, |settings, input, cx| {
+            let query = input.read(cx).value().to_owned();
+            if settings.font_query != query {
+                settings.font_query = query;
+                settings.filter_font_list(cx);
+            }
+        });
         let settings = Self {
             owner,
+            origin,
             snapshot,
             toast,
             updater,
@@ -169,7 +207,15 @@ impl SettingsWindow {
             applied_material: None,
             material_error: None,
             local_feedback: None,
+            font_search,
+            font_query: String::new(),
+            show_all_fonts: false,
+            filtered_fonts: filter_fonts(installed_fonts(), "", false),
+            preview_family: None,
+            font_scroll: UniformListScrollHandle::new(),
+            _font_search_observation: font_search_observation,
             _owner_observation: observation,
+            _appearance_observation: appearance_observation,
         };
         settings.focus(window, cx);
         settings
@@ -182,11 +228,25 @@ impl SettingsWindow {
 
     fn close(&self, window: &mut Window, cx: &mut Context<Self>) {
         window.remove_window();
-        refocus_owner(self.owner, cx);
+        refocus_owner(self.owner.clone(), self.origin, cx);
+    }
+
+    fn filter_font_list(&mut self, cx: &mut Context<Self>) {
+        self.filtered_fonts =
+            filter_fonts(installed_fonts(), &self.font_query, self.show_all_fonts);
+        self.preview_family = None;
+        self.font_scroll
+            .scroll_to_item_strict(0, ScrollStrategy::Top);
+        cx.notify();
     }
 
     fn change(&mut self, change: Change, cx: &mut Context<Self>) {
         self.local_feedback = None;
+        if matches!(change, Change::ShowAllFonts) {
+            self.show_all_fonts = !self.show_all_fonts;
+            self.filter_font_list(cx);
+            return;
+        }
         let change = if matches!(change, Change::PasteAccent) {
             let color = cx
                 .read_from_clipboard()
@@ -202,11 +262,12 @@ impl SettingsWindow {
         } else {
             change
         };
-        let owner = self.owner;
-        // Native appearance and Zen operations need the primary window. Deferring
-        // also prevents borrowing either window recursively during dispatch.
+        let owner = self.owner.clone();
+        // Release Settings before applying effects to any of the live windows.
         cx.defer(move |cx| {
-            let _ = owner.update(cx, |root, terminal_window, cx| {
+            let apply = move |root: &mut TerminalApp,
+                              terminal_window: &mut Window,
+                              cx: &mut Context<TerminalApp>| {
                 match change {
                     Change::Language(language) => {
                         root.set_language(language, cx);
@@ -224,11 +285,7 @@ impl SettingsWindow {
                     }
                     Change::PasteSocket => {
                         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                            root.set_follow_source(
-                                Some(text.trim().to_owned()),
-                                terminal_window,
-                                cx,
-                            );
+                            root.set_follow_source(Some(text.trim().to_owned()), cx);
                         } else {
                             root.follow_status = "Copy an absolute socket path first.".into();
                             cx.notify();
@@ -236,11 +293,10 @@ impl SettingsWindow {
                         return;
                     }
                     Change::DefaultSocket => {
-                        root.set_follow_source(None, terminal_window, cx);
+                        root.set_follow_source(None, cx);
                         return;
                     }
                     Change::OpenHerdr => {
-                        root.resume_follow(terminal_window, cx);
                         root.open_herdr_window(terminal_window, cx);
                         return;
                     }
@@ -261,8 +317,7 @@ impl SettingsWindow {
                         return;
                     }
                     Change::Sidebar => {
-                        root.sidebar = !root.sidebar;
-                        cx.notify();
+                        root.toggle_sidebar(cx);
                         return;
                     }
                     Change::Zen => {
@@ -278,7 +333,7 @@ impl SettingsWindow {
                         return;
                     }
                     Change::ResetFont => {
-                        root.adjust_font(15.0 - root.font_size, cx);
+                        root.adjust_font(DEFAULT_FONT_SIZE - root.font_size, cx);
                         return;
                     }
                     Change::Theme(theme) => root.appearance.theme = theme,
@@ -307,7 +362,24 @@ impl SettingsWindow {
                 }
                 root.appearance.clamp();
                 root.apply_appearance(terminal_window, cx, true);
-            });
+            };
+            let source: Option<gpui::AnyWindowHandle> = {
+                let root = owner.read(cx);
+                root.main_window
+                    .map(Into::into)
+                    .or_else(|| root.herdr_window.map(Into::into))
+                    .or_else(|| root.settings_window.map(Into::into))
+            };
+            if let Some(source) = source
+                && let Err(error) = source.update(cx, |_, window, cx| {
+                    owner.update(cx, |root, cx| apply(root, window, cx));
+                })
+            {
+                owner.update(cx, |root, cx| {
+                    root.appearance_notice = Some(format!("Apply settings: {error}"));
+                    cx.notify();
+                });
+            }
         });
     }
 
@@ -410,7 +482,7 @@ impl SettingsWindow {
             .when(!enabled, |button| button.opacity(0.35))
             .on_click(cx.listener(move |settings, _, _, cx| {
                 if enabled {
-                    settings.change(change, cx);
+                    settings.change(change.clone(), cx);
                 }
             }))
             .child(icon(glyph).text_color(rgb(p.muted)).when(enabled, |icon| {
@@ -479,7 +551,7 @@ impl SettingsWindow {
             .when(!enabled, |button| button.opacity(0.4))
             .on_click(cx.listener(move |settings, _, _, cx| {
                 if enabled {
-                    settings.change(change, cx);
+                    settings.change(change.clone(), cx);
                 }
             }))
             .child(
@@ -528,7 +600,7 @@ impl SettingsWindow {
             .cursor_pointer()
             .hover(move |style| style.bg(rgba(p.control_hover())))
             .active(move |style| style.bg(rgba(p.control_pressed())))
-            .on_click(cx.listener(move |settings, _, _, cx| settings.change(change, cx)))
+            .on_click(cx.listener(move |settings, _, _, cx| settings.change(change.clone(), cx)))
             .child(self.t(label))
     }
 
@@ -813,7 +885,9 @@ impl SettingsWindow {
                             .hover(move |style| style.bg(rgba(p.control_hover())))
                             .active(move |style| style.bg(rgba(p.control_pressed())))
                     })
-                    .on_click(cx.listener(move |settings, _, _, cx| settings.change(change, cx)))
+                    .on_click(
+                        cx.listener(move |settings, _, _, cx| settings.change(change.clone(), cx)),
+                    )
                     .child(language.label()),
             );
         }
@@ -983,8 +1057,8 @@ impl SettingsWindow {
                     .child(
                         self.row(56.0, false)
                             .child(self.row_label(
-                                "Tab sidebar",
-                                "This session · shown when the window has room.",
+                                "Main window sidebar",
+                                "Saved for this window; Herdr keeps its own sidebar preference.",
                             ))
                             .child(self.toggle(
                                 "sidebar",
@@ -998,7 +1072,7 @@ impl SettingsWindow {
                         self.row(56.0, true)
                             .child(self.row_label(
                                 "Zen mode",
-                                "This session · hide chrome and focus on the terminal.",
+                                "Saved for the main window · hide chrome and focus on the terminal.",
                             ))
                             .child(self.toggle("zen", self.snapshot.zen, true, Change::Zen, cx)),
                     ),
@@ -1010,98 +1084,161 @@ impl SettingsWindow {
             }))
     }
 
+    fn font_picker_key_down(
+        &mut self,
+        event: &gpui::KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let search = self.font_search.read(cx);
+        if event.keystroke.modifiers.modified()
+            || self.filtered_fonts.is_empty()
+            || (search.is_focused(window) && search.has_marked_text())
+        {
+            return;
+        }
+        let fonts = installed_fonts();
+        let preview = self
+            .preview_family
+            .as_ref()
+            .unwrap_or(&self.snapshot.font_family);
+        let current = self
+            .filtered_fonts
+            .iter()
+            .position(|index| fonts[*index].family == *preview);
+        let index = match event.keystroke.key.as_str() {
+            "up" => current.map_or(self.filtered_fonts.len() - 1, |index| {
+                index.saturating_sub(1)
+            }),
+            "down" => current.map_or(0, |index| (index + 1).min(self.filtered_fonts.len() - 1)),
+            "enter" => {
+                if let Some(family) = self.preview_family.clone() {
+                    self.change(Change::FontFamily(family), cx);
+                    cx.stop_propagation();
+                }
+                return;
+            }
+            _ => return,
+        };
+        self.preview_family = Some(fonts[self.filtered_fonts[index]].family.clone());
+        self.font_scroll
+            .scroll_to_item(index, ScrollStrategy::Nearest);
+        cx.notify();
+        cx.stop_propagation();
+    }
+
+    fn font_row(&self, index: usize, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
+        let p = self.snapshot.palette;
+        let family = &installed_fonts()[index].family;
+        let selected = self.snapshot.font_family == *family;
+        let previewed = self.preview_family.as_ref() == Some(family);
+        div()
+            .id(("font-family", index))
+            .h(px(30.0))
+            .px(px(10.0))
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .text_size(px(12.0))
+            .cursor_pointer()
+            .when(selected || previewed, |row| {
+                row.bg(rgba(p.control_selected(false)))
+            })
+            .hover(move |style| style.bg(rgba(p.control_hover())))
+            .on_hover(cx.listener(move |settings, hovered, _, cx| {
+                if *hovered {
+                    settings.preview_family = Some(installed_fonts()[index].family.clone());
+                    cx.notify();
+                }
+            }))
+            .on_click(cx.listener(move |settings, _, _, cx| {
+                settings.change(
+                    Change::FontFamily(installed_fonts()[index].family.clone()),
+                    cx,
+                );
+            }))
+            .child(div().flex_1().truncate().child(family.clone()))
+            .when(selected, |row| {
+                row.child(icon("check").text_color(rgb(p.accent)))
+            })
+    }
+
     fn terminal_page(&self, cx: &mut Context<Self>) -> gpui::Div {
         let p = self.snapshot.palette;
         let font_size = self.snapshot.font_size;
-        let family = self.snapshot.font_family;
-        let index = FontFamily::ALL
-            .iter()
-            .position(|candidate| *candidate == family)
-            .unwrap_or(0);
-        let previous = FontFamily::ALL[index.saturating_sub(1)];
-        let next = FontFamily::ALL[(index + 1).min(FontFamily::ALL.len() - 1)];
-        let terminal_font = family.font();
+        let configured = Typography {
+            font_family: self.snapshot.font_family.clone(),
+            font_size,
+        };
+        let preview_family = self
+            .preview_family
+            .as_ref()
+            .unwrap_or(&configured.font_family);
+        let terminal_font = Typography {
+            font_family: preview_family.clone(),
+            font_size,
+        }
+        .font();
+        let missing_notice = configured.missing_font_notice();
         div()
             .flex()
             .flex_col()
             .gap(px(16.0))
-            .child(self.heading(
-                "Terminal",
-                "Comfortable type, with a preview at the actual size.",
-            ))
+            .child(self.heading("Terminal", "Comfortable type, with a preview at the actual size."))
+            .child(self.card()
+                .child(self.row(64.0, true)
+                    .child(self.row_label("Font size", "10–28 px · default 14 px"))
+                    .child(self.stepper("font", format!("{font_size} px"), 64.0, true,
+                        font_size > MIN_FONT_SIZE, font_size < MAX_FONT_SIZE,
+                        Change::Font(-1.0), Change::Font(1.0), cx))
+                    .child(self.text_button("reset-font", "Reset to 14 px", Change::ResetFont, cx))))
             .child(
                 self.card()
-                    .child(
-                        self.row(64.0, false)
-                            .child(self.row_label(
-                                "Font family",
-                                "Saved for every pane, including new terminals.",
-                            ))
-                            .child(self.stepper(
-                                "font-family",
-                                family.label().to_owned(),
-                                190.0,
-                                true,
-                                index > 0,
-                                index + 1 < FontFamily::ALL.len(),
-                                Change::FontFamily(previous),
-                                Change::FontFamily(next),
-                                cx,
-                            )),
-                    )
-                    .child(
-                        self.row(64.0, false)
-                            .child(
-                                self.row_label(
-                                    "Font size",
-                                    "Applies to every pane in this session.",
-                                ),
-                            )
-                            .child(self.stepper(
-                                "font",
-                                format!("{font_size:.0} px"),
-                                58.0,
-                                true,
-                                font_size > 10.0,
-                                font_size < 28.0,
-                                Change::Font(-1.0),
-                                Change::Font(1.0),
-                                cx,
-                            )),
-                    )
-                    .child(
-                        self.row(50.0, true)
-                            .child(self.description("10–28 px · starts at 15 px on launch"))
-                            .child(div().flex_1())
-                            .child(
-                                self.text_button(
-                                    "reset-font",
-                                    "Reset to 15 px",
-                                    Change::ResetFont,
-                                    cx,
-                                )
-                                .w(px(132.0)),
-                            ),
-                    ),
+                    .child(self.row(64.0, true)
+                        .child(self.row_label("Font family", "Saved for all local and Herdr panes."))
+                        .child(div().max_w(px(260.0)).truncate().text_size(px(12.0))
+                            .child(configured.font_family.clone())))
+                    .when_some(missing_notice, |card, notice| {
+                        card.child(div().px(px(16.0)).pb(px(12.0)).child(self.description(notice)))
+                    })
+                    .child(div().px(px(16.0)).pb(px(12.0)).flex().items_center().gap(px(12.0))
+                        .child(div().flex_1().min_w_0().px(px(8.0)).rounded(px(6.0))
+                            .border_1().border_color(rgb(p.border))
+                            .on_key_down(cx.listener(Self::font_picker_key_down))
+                            .child(self.font_search.clone()))
+                        .child(div().text_size(px(12.0)).child(self.t("Show all fonts")))
+                        .child(self.toggle("all-fonts", self.show_all_fonts, true, Change::ShowAllFonts, cx)))
+                    .child(div().px(px(16.0)).pb(px(12.0)).child(self.description(if self.show_all_fonts {
+                        "All installed fonts · proportional fonts may not align terminal columns."
+                    } else {
+                        "Monospace fonts · turn on Show all fonts to choose any installed family."
+                    })))
+                    .child(div().flex().border_t_1().border_color(rgb(p.divider))
+                        .child(div().w(px(220.0)).flex_shrink_0().border_r_1().border_color(rgb(p.divider))
+                            .when(self.filtered_fonts.is_empty(), |list| list.child(
+                                div().p(px(16.0)).child(self.description("No matching fonts. Try another search or show all fonts."))))
+                            .when(!self.filtered_fonts.is_empty(), |list| list.child(
+                                uniform_list("installed-fonts", self.filtered_fonts.len(), cx.processor(|settings, range: std::ops::Range<usize>, _, cx| {
+                                    range.filter_map(|position| settings.filtered_fonts.get(position).copied())
+                                        .map(|index| settings.font_row(index, cx)).collect::<Vec<_>>()
+                                }))
+                                .h(px(240.0)).track_scroll(&self.font_scroll))))
+                        .child(div().flex_1().min_w_0().p(px(12.0)).flex().flex_col().gap(px(10.0)).bg(rgb(p.terminal))
+                            .child(self.description("LIVE PREVIEW"))
+                            .child(div().truncate().text_size(px(11.0)).text_color(rgb(p.muted)).child(preview_family.clone()))
+                            .child(div().id("font-preview-scroll").overflow_x_scroll()
+                                .font(terminal_font.clone()).font_features(terminal_font.features)
+                                .text_size(px(font_size)).line_height(px(font_size * 1.35)).whitespace_nowrap()
+                                .child(div().child("The quick brown fox"))
+                                .child(div().child("中文 日本語 한글"))
+                                .child(div().child("0123456789  Il1 O0"))
+                                .child(div().text_color(rgb(p.accent)).child("let answer = 42;"))
+                                .child(div().child("\u{f07c} \u{f120} \u{e0a0} \u{f121} \u{f013}"))
+                                .child(div().child("😀 🚀 🌍 ❤️")))))
+                    .child(div().px(px(16.0)).py(px(10.0)).border_t_1().border_color(rgb(p.divider))
+                        .child(self.description("Hover or use ↑/↓ to preview. Click or press Enter to select."))),
             )
-            .child(
-                self.card()
-                    .h(px(118.0))
-                    .p(px(16.0))
-                    .gap(px(10.0))
-                    .bg(rgb(p.terminal))
-                    .child(self.description("MONOSPACE PREVIEW"))
-                    .child(
-                        div()
-                            .font(terminal_font.clone())
-                            .font_features(terminal_font.features)
-                            .text_size(px(font_size))
-                            .line_height(px(font_size * 1.35))
-                            .child("Aa Bb 0123456789")
-                            .child(div().text_color(rgb(p.accent)).child("let answer = 42;")),
-                    ),
-            )
-            .child(self.description("Font family is saved. Font size applies to this session."))
+            .child(self.description("Font family and size are saved automatically. Nerd Font, CJK, and emoji fallbacks are retained."))
     }
 
     fn shortcut_group(
@@ -1148,38 +1285,46 @@ impl SettingsWindow {
             .gap(px(16.0))
             .child(self.heading(
                 "Shortcuts",
-                "A reference for the terminal window. Bindings are fixed.",
+                "Shared shortcuts work in both main and Herdr windows.",
             ))
             .child(self.shortcut_group(
-                "Tabs & panes",
+                "Tabs & panes · both windows",
                 &[
-                    ("New local tab / return to local", "⌘T"),
+                    ("New tab", "⌘T"),
                     ("Close pane", "⌘W"),
                     ("Close tab", "⌘⇧W"),
+                    ("Select tab 1–9 by index", "⌘1…⌘9"),
                     ("Next / previous tab", "⌃Tab / ⌃⇧Tab"),
-                    ("Customize tab", "⌘⇧E"),
                     ("Split right / down", "⌘D / ⌘⇧D"),
-                    ("Next / previous pane", "⌘⌥→ / ⌘⌥←"),
-                    ("Restart active pane", "⌘⇧R"),
+                    ("Previous / next pane", "⌘[ / ⌘]"),
+                    ("Previous / next pane (aliases)", "⌘⌥← / ⌘⌥→"),
                 ],
             ))
+            .child(self.description("⌘9 selects tab 9. An index with no tab does nothing."))
             .child(self.shortcut_group(
-                "View & editing",
+                "View & editing · both windows",
                 &[
                     ("Tab sidebar", "⌘B"),
-                    ("Zen mode", "⌘⇧Z"),
                     ("Increase / decrease font", "⌘+ / ⌘−"),
-                    ("Reset font size", "⌘0"),
+                    ("Reset font size to 14 px", "⌘0"),
                     ("Copy / paste", "⌘C / ⌘V"),
                     ("Select all", "⌘A"),
+                    ("Open settings", "⌘,"),
+                ],
+            ))
+            .child(self.shortcut_group("Herdr window", &[("Previous / next agent", "⌘⇧[ / ⌘⇧]")]))
+            .child(self.shortcut_group(
+                "Main window only",
+                &[
+                    ("Zen mode", "⌘⇧Z"),
+                    ("Restart active pane", "⌘⇧R"),
+                    ("Customize tab", "⌘⇧E"),
                 ],
             ))
             .child(self.shortcut_group(
                 "Application",
                 &[
-                    ("Open settings", "⌘,"),
                     ("Close settings", "Esc / ⌘W / ⌘⇧W"),
-                    ("Close Herdr window / detach client", "⌘W / ⌘⇧W"),
                     ("Quit MonoTerm", "⌘Q"),
                 ],
             ))
@@ -1441,7 +1586,11 @@ impl SettingsWindow {
             {
                 "Could not save preferences. Changes are temporary."
             }
-            Some(message) if self.local_feedback.is_some() || self.material_error.is_some() => {
+            Some(message)
+                if self.local_feedback.is_some()
+                    || self.material_error.is_some()
+                    || message.starts_with("Font \"") =>
+            {
                 message
             }
             Some(message)
@@ -1483,14 +1632,42 @@ impl SettingsWindow {
     }
 }
 
-fn refocus_owner(owner: WindowHandle<TerminalApp>, cx: &mut App) {
+fn refocus_owner(owner: Entity<TerminalApp>, origin: gpui::AnyWindowHandle, cx: &mut App) {
     cx.defer(move |cx| {
-        let _ = owner.update(cx, |root, window, cx| {
-            window.activate_window();
-            if let Some(session) = root.active_session() {
-                session.focus(window, cx);
-            }
+        owner.update(cx, |root, cx| {
+            root.settings_window = None;
+            cx.notify();
         });
+        let focus = |destination: gpui::AnyWindowHandle, cx: &mut App| {
+            destination.update(cx, |view, window, cx| {
+                window.activate_window();
+                if let Ok(root) = view.clone().downcast::<TerminalApp>() {
+                    root.update(cx, |root, cx| {
+                        if let Some(session) = root.active_session() {
+                            session.focus(window, cx);
+                        } else {
+                            root.root_focus.focus(window, cx);
+                        }
+                    });
+                } else if let Ok(herdr) = view.downcast::<crate::herdr_view::HerdrWindow>() {
+                    herdr.update(cx, |herdr, cx| herdr.focus(window, cx));
+                }
+            })
+        };
+        if focus(origin, cx).is_ok() {
+            return;
+        }
+        let destination: Option<gpui::AnyWindowHandle> = {
+            let root = owner.read(cx);
+            root.herdr_window
+                .map(Into::into)
+                .or_else(|| root.main_window.map(Into::into))
+        };
+        if let Some(destination) = destination
+            && let Err(error) = focus(destination, cx)
+        {
+            eprintln!("Focus terminal window: {error}");
+        }
     });
 }
 
@@ -1554,6 +1731,16 @@ impl Render for SettingsWindow {
             )
             .on_action(
                 cx.listener(|settings, _: &CloseSession, window, cx| settings.close(window, cx)),
+            )
+            .on_action(cx.listener(|settings, _: &crate::ReturnLocal, _, cx| {
+                TerminalApp::show_main(settings.owner.clone(), cx);
+            }))
+            .on_action(
+                cx.listener(|settings, _: &crate::OpenHerdrWindow, window, cx| {
+                    settings
+                        .owner
+                        .update(cx, |root, cx| root.open_herdr_window(window, cx));
+                }),
             )
             .on_action(cx.listener(|settings, _: &CloseTab, window, cx| settings.close(window, cx)))
             .on_action(

@@ -125,6 +125,86 @@ pub fn selected_text(
         .join("\n")
 }
 
+/// Resolve links within a single pane/popup; never join adjacent pane columns.
+pub fn link_at(
+    frame: &FrameData,
+    rect: SurfaceRect,
+    col: u16,
+    row: u16,
+) -> Option<gpui_ghostty_terminal::view::links::Link> {
+    use gpui_ghostty_terminal::view::links::{Link, is_web_url, plain_link_at};
+    if !contains(rect, col, row) {
+        return None;
+    }
+    let cell = |col: u16, row: u16| {
+        if col >= frame.width || row >= frame.height {
+            return None;
+        }
+        frame
+            .cells
+            .get(usize::from(row) * usize::from(frame.width) + usize::from(col))
+    };
+    let hit = cell(col, row)?;
+    if let Some(index) = hit.hyperlink {
+        let url = frame.hyperlinks.get(index as usize)?;
+        if !is_web_url(url) {
+            return None;
+        }
+        let width = usize::from(rect.width);
+        let hit = usize::from(row - rect.y) * width + usize::from(col - rect.x);
+        let same = |offset: usize| {
+            cell(
+                rect.x + (offset % width) as u16,
+                rect.y + (offset / width) as u16,
+            )
+            .is_some_and(|cell| cell.hyperlink == Some(index))
+        };
+        let mut start = hit;
+        while start > 0 && hit - start < 8192 && same(start - 1) {
+            start -= 1;
+        }
+        let mut end = hit + 1;
+        while end < width * usize::from(rect.height) && end - start < 8192 && same(end) {
+            end += 1;
+        }
+        return Some(Link {
+            url: url.clone(),
+            cells: (start..end)
+                .map(|offset| {
+                    (
+                        rect.x + (offset % width) as u16,
+                        rect.y + (offset / width) as u16,
+                    )
+                })
+                .collect(),
+        });
+    }
+    let mut link = plain_link_at(
+        rect.width,
+        rect.height,
+        col - rect.x,
+        row - rect.y,
+        |col, row| {
+            let cell = cell(rect.x + col, rect.y + row)?;
+            if cell.modifier & (1 << 7) != 0 {
+                return None;
+            }
+            Some(if cell.skip {
+                ""
+            } else if cell.symbol.is_empty() {
+                " "
+            } else {
+                &cell.symbol
+            })
+        },
+    )?;
+    for (col, row) in &mut link.cells {
+        *col += rect.x;
+        *row += rect.y;
+    }
+    Some(link)
+}
+
 const MAX_CACHED_GLYPHS: usize = 2048;
 const MAX_CACHED_SYMBOL_BYTES: usize = 256;
 
@@ -653,6 +733,77 @@ mod tests {
         assert_eq!(selected_text(&frame, rect, (7, 1), (1, 0)), "你a\nbc");
         let empty = SurfaceRect { width: 0, ..rect };
         assert!(selected_text(&frame, empty, (1, 0), (1, 1)).is_empty());
+    }
+
+    fn link_frame(rows: &[&str]) -> FrameData {
+        FrameData {
+            width: rows[0].chars().count() as u16,
+            height: rows.len() as u16,
+            cells: rows
+                .iter()
+                .flat_map(|row| row.chars().map(|ch| cell(&ch.to_string())))
+                .collect(),
+            cursor: None,
+            hyperlinks: vec![],
+            graphics: vec![],
+        }
+    }
+
+    #[test]
+    fn links_use_osc_destination_before_plain_label_and_reject_schemes() {
+        let mut frame = link_frame(&["https://label.test "]);
+        let rect = SurfaceRect {
+            x: 0,
+            y: 0,
+            width: frame.width,
+            height: 1,
+        };
+        frame.hyperlinks = vec!["http://localhost:3000/actual".into()];
+        for cell in &mut frame.cells[..18] {
+            cell.hyperlink = Some(0);
+        }
+        let link = link_at(&frame, rect, 3, 0).unwrap();
+        assert_eq!(link.url, "http://localhost:3000/actual");
+        assert_eq!(link.cells.len(), 18);
+        frame.hyperlinks[0] = "javascript:alert(1)".into();
+        assert!(link_at(&frame, rect, 3, 0).is_none());
+        frame.hyperlinks.clear();
+        assert!(link_at(&frame, rect, 3, 0).is_none());
+    }
+
+    #[test]
+    fn plain_links_wrap_inside_panes_and_do_not_leak_into_neighbors() {
+        let frame = link_frame(&["|http://local|other|", "|host:3000/a |other|"]);
+        let rect = SurfaceRect {
+            x: 1,
+            y: 0,
+            width: 12,
+            height: 2,
+        };
+        let link = link_at(&frame, rect, 3, 1).unwrap();
+        assert_eq!(link.url, "http://localhost:3000/a");
+        assert!(link.cells.contains(&(1, 1)));
+        assert!(link.cells.iter().all(|&(col, _)| (1..13).contains(&col)));
+        assert!(link_at(&frame, rect, 0, 1).is_none());
+        assert!(link_at(&frame, rect, 12, 1).is_none());
+        assert!(link_at(&frame, rect, 13, 0).is_none());
+    }
+
+    #[test]
+    fn plain_links_follow_wire_cells_after_wide_glyphs() {
+        let mut frame = link_frame(&["你· http://a.com "]);
+        frame.cells[1].skip = true;
+        let rect = SurfaceRect {
+            x: 0,
+            y: 0,
+            width: frame.width,
+            height: 1,
+        };
+        assert_eq!(
+            link_at(&frame, rect, 6, 0).unwrap().cells.first(),
+            Some(&(3, 0))
+        );
+        assert!(link_at(&frame, rect, frame.width, 0).is_none());
     }
 
     #[test]

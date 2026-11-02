@@ -306,15 +306,9 @@ impl HerdrWindow {
                             self.language.text("Settings · ⌘,"),
                             p,
                         )
-                        .on_click(cx.listener(|view, _, _, cx| {
-                            let owner = view.owner;
-                            cx.defer(move |cx| {
-                                if let Err(error) = owner
-                                    .update(cx, |root, window, cx| root.open_settings(window, cx))
-                                {
-                                    eprintln!("Herdr settings: {error}");
-                                }
-                            });
+                        .on_click(cx.listener(|view, _, window, cx| {
+                            view.owner
+                                .update(cx, |root, cx| root.open_settings(window, cx));
                         })),
                     ),
             )
