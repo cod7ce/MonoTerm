@@ -9,6 +9,7 @@ use std::{
     ops::Range,
     rc::Rc,
 };
+use unicode_width::UnicodeWidthStr;
 
 const ANSI: [u32; 16] = [
     0x1c1c1c, 0xcc6666, 0xb5bd68, 0xf0c674, 0x81a2be, 0xb294bb, 0x8abeb7, 0xc5c8c6, 0x666666,
@@ -211,17 +212,41 @@ fn background_runs(
     foreground: u32,
     background: u32,
 ) -> impl Iterator<Item = (Range<usize>, u32)> + '_ {
+    // Herdr leaves a default-colored blank after wide glyphs, sometimes without
+    // `skip`. Its ANSI renderer consumes that column with the leading glyph.
+    let background_at = move |index: usize| {
+        let cell = if index > 0 && wide_symbol(&cells[index - 1].symbol) {
+            &cells[index - 1]
+        } else {
+            &cells[index]
+        };
+        colors(cell, foreground, background).1
+    };
     let mut start = 0;
     std::iter::from_fn(move || {
-        let (_, color) = colors(cells.get(start)?, foreground, background);
+        cells.get(start)?;
+        let color = background_at(start);
         let mut end = start + 1;
-        while end < cells.len() && colors(&cells[end], foreground, background).1 == color {
+        while end < cells.len() && background_at(end) == color {
             end += 1;
         }
         let columns = start..end;
         start = end;
         Some((columns, color))
     })
+}
+
+fn wide_symbol(symbol: &str) -> bool {
+    let mut chars = symbol.chars();
+    symbol.width() > 1
+        || matches!(
+            (chars.next(), chars.next(), chars.next()),
+            (
+                Some('\u{ff66}'..='\u{ff9d}'),
+                Some('\u{ff9e}' | '\u{ff9f}'),
+                None
+            )
+        )
 }
 
 pub struct CellPainter {
@@ -532,6 +557,33 @@ mod tests {
             .map(|row| background_runs(row, 0xffffff, 0).collect::<Vec<_>>())
             .collect::<Vec<_>>();
         assert_eq!(rows, vec![vec![(0..3, 0)], vec![(0..2, 0x123456)]]);
+    }
+
+    #[test]
+    fn wide_glyph_background_covers_unmarked_default_continuations() {
+        for symbol in ["对", "🐸", "ｶﾞ"] {
+            let mut lead = cell(symbol);
+            lead.bg = 0x02424242;
+            let mut latin = cell("a");
+            latin.bg = lead.bg;
+            let cells = [lead.clone(), cell(" "), latin, cell(" ")];
+            assert_eq!(
+                background_runs(&cells, 0xffffff, 0).collect::<Vec<_>>(),
+                vec![(0..3, 0x424242), (3..4, 0)]
+            );
+            lead.fg = 0x02123456;
+            lead.modifier = 1 << 6;
+            assert_eq!(
+                background_runs(&[lead, cell(" ")], 0xffffff, 0).collect::<Vec<_>>(),
+                vec![(0..2, 0x123456)]
+            );
+        }
+        // A new row and ordinary spaces must retain their own background.
+        let cells = [cell(" "), cell("a"), cell(" ")];
+        assert_eq!(
+            background_runs(&cells, 0xffffff, 0).collect::<Vec<_>>(),
+            vec![(0..3, 0)]
+        );
     }
 
     #[test]

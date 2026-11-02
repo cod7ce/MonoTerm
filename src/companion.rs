@@ -337,7 +337,7 @@ impl TerminalApp {
             titlebar: Some(TitlebarOptions {
                 title: Some("Herdr — MonoTerm".into()),
                 appears_transparent: true,
-                traffic_light_position: Some(point(px(12.0), px(9.0))),
+                traffic_light_position: Some(point(px(12.0), px(15.0))),
             }),
             window_background: WindowBackgroundAppearance::Transparent,
             window_min_size: Some(size(px(640.0), px(360.0))),

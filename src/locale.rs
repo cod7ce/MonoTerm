@@ -331,6 +331,50 @@ fn chinese(english: &str) -> Option<&'static str> {
         // Main window, Herdr client integration, and static status messages.
         "WORKSPACES" => "工作区",
         "TABS" => "标签页",
+        "Sidebar view" => "侧边栏视图",
+        "Rename" => "重命名",
+        "New worktree" => "新建 worktree",
+        "Open worktree…" => "打开 worktree…",
+        "Open worktree" => "打开 worktree",
+        "Create worktree" => "创建 worktree",
+        "Delete worktree checkout…" => "删除 worktree 工作目录…",
+        "Delete worktree checkout?" => "删除 worktree 工作目录？",
+        "Force delete checkout?" => "强制删除工作目录？",
+        "Force remove" => "强制删除",
+        "Remove" => "删除",
+        "Base branch" => "基于分支",
+        "Branch name (optional)" => "分支名称（可选）",
+        "Leave blank to generate a branch name. Herdr chooses the checkout directory." => {
+            "留空将自动生成分支名称，工作目录由 Herdr 选择。"
+        }
+        "No worktrees available" => "没有可用的 worktree",
+        "Open" => "已打开",
+        "Working…" => "正在处理…",
+        "Remove this checkout directory and close its Space. The branch is kept." => {
+            "删除此工作目录并关闭对应的 Space，分支保留。"
+        }
+        "Modified, untracked and submodule files in this checkout will be permanently lost. The branch is kept." => {
+            "此工作目录中修改过的文件、未跟踪文件和子模块内容将永久丢失，分支保留。"
+        }
+        "New tab here" => "在此新建标签页",
+        "Rename Space…" => "重命名 Space…",
+        "Rename Space" => "重命名 Space",
+        "Copy directory" => "复制目录",
+        "Copy branch" => "复制分支",
+        "Collapse group" => "折叠分组",
+        "Expand group" => "展开分组",
+        "Close Space…" => "关闭 Space…",
+        "Close group…" => "关闭分组…",
+        "Close only this Space?" => "仅关闭此 Space？",
+        "Close group?" => "关闭整个分组？",
+        "Close group" => "关闭分组",
+        "Close Space" => "关闭 Space",
+        "Spaces to close" => "将关闭的 Space 数",
+        "Terminals to close" => "将关闭的终端数",
+        "Running processes in these Spaces will end. Checkout files and branches are kept." => {
+            "这些 Space 内运行的进程将结束，工作目录和分支均保留。"
+        }
+        "Space name cannot be empty" => "Space 名称不能为空",
         "Customize tab" => "自定义标签页",
         "Customize tab…" => "自定义标签页…",
         "Title" => "标题",
@@ -362,8 +406,6 @@ fn chinese(english: &str) -> Option<&'static str> {
         "Close a tab before opening another workspace." => "请先关闭一个标签页，再打开其他工作区。",
         "Herdr agents — MonoTerm" => "Herdr 智能体 — MonoTerm",
         "Herdr agents" => "Herdr 智能体",
-        "SPACES" | "spaces" => "空间",
-        "AGENTS" | "agents" => "智能体",
         "new" => "新建",
         "menu" => "菜单",
         "New workspace" => "新建工作区",
@@ -536,6 +578,10 @@ mod tests {
         let unknown = String::from("new diagnostic: /tmp/Settings");
         assert_eq!(Language::Chinese.dynamic_text(&unknown), unknown);
         assert_eq!(Language::Chinese.text("MonoTerm"), "MonoTerm");
+        // Sidebar section headings and the view menu keep Herdr's product terms.
+        for term in ["SPACES", "AGENTS", "Spaces", "Agents", "Spaces and Agents"] {
+            assert_eq!(Language::Chinese.text(term), term);
+        }
     }
 
     #[test]

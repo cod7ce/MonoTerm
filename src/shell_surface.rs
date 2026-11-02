@@ -1,6 +1,19 @@
-use gpui::{Bounds, Pixels, RenderImage, Rgba, Window, point, px, size};
+use crate::{
+    appearance::Palette,
+    window_chrome::{SHELL_INSET, SHELL_RADIUS},
+};
+use gpui::{Bounds, Pixels, RenderImage, Rgba, Window, canvas, point, prelude::*, px, rgba, size};
 use image::{Frame, RgbaImage};
 use std::sync::Arc;
+
+/// Which material paints the window frame around the shell surface.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Surround {
+    /// Accent-tinted frame used by the local shell's tab sidebar.
+    Accent,
+    /// Unmixed theme surface with half the transparency for Herdr's sidebar.
+    Theme,
+}
 
 #[derive(Default)]
 pub struct CornerCache {
@@ -23,7 +36,7 @@ impl CornerCache {
                     eprintln!("Could not release shell corner image: {error}");
                 }
             }
-            let side = (crate::SHELL_RADIUS * scale).ceil() as u32;
+            let side = (SHELL_RADIUS * scale).ceil() as u32;
             for (flip_x, flip_y) in [(false, false), (true, false), (false, true), (true, true)] {
                 let pixels = RgbaImage::from_fn(side, side, |column, row| {
                     let x = if flip_x { side - 1 - column } else { column };
@@ -44,6 +57,46 @@ impl CornerCache {
         }
         self.images.clone()
     }
+}
+
+pub fn background(
+    cache: &mut CornerCache,
+    palette: Palette,
+    shell_left: f32,
+    zen: bool,
+    surround: Surround,
+    window: &mut Window,
+) -> impl IntoElement {
+    let color = |rgb: u32, alpha: f32| rgba((rgb << 8) | (alpha * 255.0).round() as u32);
+    let outer = match surround {
+        Surround::Accent => color(palette.outer_color(), palette.outer_alpha()),
+        Surround::Theme => color(palette.shell, palette.herdr_sidebar().outer_alpha()),
+    };
+    let shell = color(palette.terminal, palette.terminal_alpha());
+    let corners = if zen {
+        Vec::new()
+    } else {
+        cache.images(outer, shell, window)
+    };
+    canvas(
+        |_, _, _| {},
+        move |bounds, _, window, _| {
+            if zen {
+                window.paint_quad(gpui::fill(bounds, shell));
+                return;
+            }
+            let surface = Bounds::new(
+                bounds.origin + point(px(shell_left), px(SHELL_INSET)),
+                size(
+                    bounds.size.width - px(shell_left + SHELL_INSET),
+                    bounds.size.height - px(SHELL_INSET * 2.0),
+                ),
+            );
+            paint(bounds, surface, outer, shell, &corners, window);
+        },
+    )
+    .absolute()
+    .size_full()
 }
 
 // Composite the two mutually exclusive coverages before painting. Painting two
@@ -78,7 +131,7 @@ pub fn paint(
     corners: &[Arc<RenderImage>],
     window: &mut Window,
 ) {
-    let radius = px((crate::SHELL_RADIUS * window.scale_factor()).ceil() / window.scale_factor());
+    let radius = px((SHELL_RADIUS * window.scale_factor()).ceil() / window.scale_factor());
     let left = surface.left();
     let right = surface.right();
     let top = surface.top();

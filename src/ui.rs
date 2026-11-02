@@ -23,6 +23,10 @@ pub struct Icons;
 
 const ICONS: &[(&str, &str)] = &[
     ("terminal", "<path d='m5 6 5 6-5 6m7 0h7'/>"),
+    (
+        "terminal-window",
+        "<rect x='3' y='4' width='18' height='16' rx='3'/><path d='m7 8 4 4-4 4m7 0h3'/>",
+    ),
     ("code", "<path d='m8 5-6 7 6 7m8-14 6 7-6 7m-2-16-4 18'/>"),
     (
         "server",
@@ -44,6 +48,15 @@ const ICONS: &[(&str, &str)] = &[
     (
         "branch",
         "<circle cx='6' cy='5' r='2'/><circle cx='6' cy='19' r='2'/><circle cx='18' cy='5' r='2'/><path d='M6 7v10m0-3c8 0 12-2 12-7'/>",
+    ),
+    (
+        "edit",
+        "<path d='m14 4 6 6M4 20l5-1L20 8a2 2 0 0 0-4-4L5 15Z'/>",
+    ),
+    ("folder", "<path d='M3 7V5h6l2 2h10v13H3Z'/>"),
+    (
+        "trash",
+        "<path d='M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7m4-7v7'/>",
     ),
     ("plus", "<path d='M12 5v14M5 12h14'/>"),
     ("close", "<path d='m6 6 12 12M18 6 6 18'/>"),
@@ -229,6 +242,29 @@ pub fn icon_button(
     palette: Palette,
 ) -> gpui::Stateful<gpui::Div> {
     icon_toggle(id, name, label, palette, false)
+}
+
+pub fn icon_button_enabled(
+    id: &'static str,
+    name: &'static str,
+    label: &'static str,
+    palette: Palette,
+    enabled: bool,
+) -> gpui::Stateful<gpui::Div> {
+    if enabled {
+        icon_button(id, name, label, palette)
+    } else {
+        div()
+            .id(id)
+            .size(px(28.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(6.0))
+            .text_color(rgb(palette.subtle))
+            .tooltip(move |_, cx| cx.new(|_| Tooltip(label, palette)).into())
+            .child(icon(name).text_color(rgb(palette.subtle)))
+    }
 }
 
 pub fn icon_toggle(

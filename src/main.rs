@@ -5,6 +5,7 @@ mod herdr;
 mod herdr_connection;
 mod herdr_render;
 mod herdr_view;
+mod herdr_worktree;
 mod layout;
 mod locale;
 mod process_monitor;
@@ -18,6 +19,7 @@ mod toast;
 mod typography;
 mod ui;
 mod updates;
+mod window_chrome;
 mod window_style;
 
 use appearance::{Appearance, Palette};
@@ -65,14 +67,7 @@ actions!(
     ]
 );
 
-/// Gap between the window edge and the shell on every side except Zen.
-const SHELL_INSET: f32 = 5.0;
-/// Native window buttons, sidebar toggle and shell header controls share this center.
-const TOOLBAR_CENTER: f32 = 22.0;
-/// Compact titlebar: keeps the y=22 control center with less empty space below.
-const TOOLBAR_HEIGHT: f32 = 34.0;
-/// Inner curve visually follows the native window contour after the shell inset.
-const SHELL_RADIUS: f32 = 12.0;
+use window_chrome::{SHELL_INSET, SHELL_RADIUS, TOOLBAR_CENTER, TOOLBAR_HEIGHT};
 
 struct TerminalApp {
     sessions: Vec<Session>,
@@ -197,7 +192,7 @@ impl TerminalApp {
             typography,
             language,
             sidebar: true,
-            sidebar_width: 228.0,
+            sidebar_width: window_chrome::SIDEBAR_WIDTH,
             resizing_sidebar: false,
             settings_window: None,
             updater,
@@ -637,35 +632,14 @@ impl TerminalApp {
     }
 
     fn background(&mut self, shell_left: f32, window: &mut Window) -> impl IntoElement {
-        let p = self.palette;
-        let zen = self.zen;
-        let color = |rgb: u32, alpha: f32| rgba((rgb << 8) | (alpha * 255.0).round() as u32);
-        let outer = color(p.outer_color(), p.outer_alpha());
-        let shell = color(p.terminal, p.terminal_alpha());
-        let corners = if zen {
-            Vec::new()
-        } else {
-            self.shell_corners.images(outer, shell, window)
-        };
-        canvas(
-            |_, _, _| {},
-            move |bounds, _, window, _| {
-                if zen {
-                    window.paint_quad(gpui::fill(bounds, shell));
-                    return;
-                }
-                let surface = Bounds::new(
-                    bounds.origin + point(px(shell_left), px(SHELL_INSET)),
-                    size(
-                        bounds.size.width - px(shell_left + SHELL_INSET),
-                        bounds.size.height - px(SHELL_INSET * 2.0),
-                    ),
-                );
-                shell_surface::paint(bounds, surface, outer, shell, &corners, window);
-            },
+        shell_surface::background(
+            &mut self.shell_corners,
+            self.palette,
+            shell_left,
+            self.zen,
+            shell_surface::Surround::Accent,
+            window,
         )
-        .absolute()
-        .size_full()
     }
 
     fn titlebar(
@@ -677,45 +651,24 @@ impl TerminalApp {
         let p = self.palette;
         let follow_tip = self.t(self.follow_label());
         let control_offset = px(TOOLBAR_CENTER - (SHELL_INSET + TOOLBAR_HEIGHT / 2.0));
-        div()
-            .h(px(TOOLBAR_HEIGHT))
-            .flex_shrink_0()
-            .flex()
-            .items_center()
-            .gap_1()
-            .pr_2()
+        window_chrome::toolbar()
             .child(
-                div()
-                    .relative()
-                    .top(control_offset)
-                    .w(px(if show_sidebar {
-                        sidebar_width - 4.0
-                    } else {
-                        110.0
-                    }))
-                    .h_full()
-                    .flex_shrink_0()
-                    .flex()
-                    .items_center()
-                    .pl(px(78.0))
-                    .pr_1()
-                    .child(div().flex_1())
-                    .child(
-                        ui::icon_toggle(
-                            "toggle-sidebar",
-                            "sidebar",
-                            self.t("Toggle sidebar · ⌘B"),
-                            p,
-                            self.sidebar,
-                        )
-                        .on_click(cx.listener(|root, _, window, cx| {
-                            root.sidebar = !root.sidebar;
-                            if let Some(session) = root.active_session() {
-                                session.focus(window, cx);
-                            }
-                            cx.notify();
-                        })),
-                    ),
+                window_chrome::sidebar_toggle_slot(show_sidebar, sidebar_width).child(
+                    ui::icon_toggle(
+                        "toggle-sidebar",
+                        "sidebar",
+                        self.t("Toggle sidebar · ⌘B"),
+                        p,
+                        self.sidebar,
+                    )
+                    .on_click(cx.listener(|root, _, window, cx| {
+                        root.sidebar = !root.sidebar;
+                        if let Some(session) = root.active_session() {
+                            session.focus(window, cx);
+                        }
+                        cx.notify();
+                    })),
+                ),
             )
             .child(
                 div()
@@ -803,10 +756,6 @@ impl TerminalApp {
                     .flex()
                     .items_center()
                     .gap_1()
-                    .child(
-                        icon_button("restart", "restart", self.t("Restart pane · ⌘⇧R"), p)
-                            .on_click(cx.listener(|root, _, window, cx| root.restart(window, cx))),
-                    )
                     .child(
                         icon_button("split-right", "split-right", self.t("Split right · ⌘D"), p)
                             .on_click(cx.listener(|root, _, window, cx| {
@@ -1011,18 +960,7 @@ impl TerminalApp {
             let label = self.tab_label(tab);
             let panes = tab.pane_count();
             list = list.child(
-                ui::keyboard_control(div().id(("session", tab_id)), p)
-                    .map(ui::choice_navigation)
-                    .h(px(28.0))
-                    .pl(px(10.0))
-                    .pr_2()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .rounded(px(6.0))
-                    .cursor_pointer()
-                    .bg(rgba(p.tab_background(selected, false)))
-                    .hover(move |s| s.bg(rgba(p.tab_background(selected, true))))
+                window_chrome::sidebar_row(("session", tab_id), selected, true, p)
                     .on_click(
                         cx.listener(move |root, _, window, cx| root.select(index, window, cx)),
                     )
@@ -1044,20 +982,7 @@ impl TerminalApp {
                             p.muted
                         })))
                     })
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(px(12.0))
-                            .font_weight(if selected {
-                                gpui::FontWeight::MEDIUM
-                            } else {
-                                gpui::FontWeight::NORMAL
-                            })
-                            .text_color(rgb(if selected { p.text } else { p.muted }))
-                            .child(label),
-                    )
+                    .child(window_chrome::sidebar_label(selected, true, p).child(label))
                     .when(panes > 1, |e| {
                         e.child(
                             div()
@@ -1077,13 +1002,7 @@ impl TerminalApp {
             .flex()
             .flex_col()
             .child(
-                div()
-                    .pl_3()
-                    .pr_1()
-                    .h(px(40.0))
-                    .flex()
-                    .items_center()
-                    .gap_1()
+                window_chrome::sidebar_heading()
                     .child(div().flex_1().child(self.label("TABS")))
                     .child(
                         icon_button("new-tab", "plus", self.t("New tab · ⌘T"), p).on_click(
@@ -1484,15 +1403,11 @@ impl Render for TerminalApp {
                     .and_then(|session| session.notice.clone())
             });
         let viewport_width = f32::from(window.viewport_size().width);
-        let show_sidebar = !self.zen && self.sidebar && viewport_width >= 760.0;
+        let show_sidebar = !self.zen && window_chrome::show_sidebar(self.sidebar, viewport_width);
         // Clamp only the rendered layout. The stored width is the user's choice,
         // so shrinking the window temporarily does not discard it.
         let sidebar_width = if show_sidebar {
-            let width = self
-                .sidebar_width
-                .clamp(180.0, (viewport_width - 420.0).min(480.0));
-            // Image tiles and layout must share the same device-pixel boundary.
-            (width * window.scale_factor()).round() / window.scale_factor()
+            window_chrome::sidebar_width(self.sidebar_width, viewport_width, window.scale_factor())
         } else {
             self.sidebar_width
         };

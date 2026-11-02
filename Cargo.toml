@@ -1,6 +1,6 @@
 [package]
 name = "monoterm"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2024"
 publish = false
 repository = "https://github.com/cod7ce/MonoTerm"
@@ -24,7 +24,9 @@ gpui_ghostty_terminal = { path = "vendor/gpui-ghostty/crates/gpui_ghostty_termin
 portable-pty = "0.9"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+toml = "0.8.23"
 unicode-segmentation = "1.12"
+unicode-width = "0.2.2"
 image = { version = "0.25", default-features = false }
 herdr-client = { path = "vendor/herdr/herdr-client" }
 herdr-protocol = { path = "vendor/herdr/herdr-protocol" }

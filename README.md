@@ -2,7 +2,7 @@
 
 A native macOS terminal built with Rust, GPUI and Ghostty. Each local pane owns a real PTY; Ghostty handles terminal state and GPUI renders the terminal and application.
 
-**Current version: 0.1.1.** Apple Silicon, macOS 14 or later.
+**Current version: 0.2.0.** Apple Silicon, macOS 14 or later.
 
 ## Features
 
@@ -12,7 +12,9 @@ A native macOS terminal built with Rust, GPUI and Ghostty. Each local pane owns 
 - Ghostty 1.4 Kitty graphics: direct PNG/raw pixels and local files, crops, relative placements, Unicode placeholders, layering, scrolling, animation and deletion.
 - Shared Light/Dark appearance, accent colors, transparency, native blur and font preferences.
 - English and Simplified Chinese interfaces.
-- An optional native Herdr client and companion shells that follow verified local agents.
+- An optional native Herdr client with grouped repository/worktree Spaces, agent activity indicators, named tabs, and Spaces/Agents sidebar views.
+- Space menus for renaming, creating/opening worktrees, copying paths/branches, closing groups, and confirmed linked-checkout removal.
+- Companion shells that follow verified local agents, with shared window styling and native Chinese input in the Herdr terminal.
 - A **Version** settings tab with current version, manual update checks and release downloads. Sparkle verifies signed update packages; automatic checking and background downloads are disabled.
 
 ## Download and updates
@@ -70,6 +72,8 @@ The Herdr button enables local companion following. Settings → Integrations co
 
 Following respects manual tab selection, verified process identities, idle-shell checks and connection/input fences. Clicking panes or resizing splits does not pin following. Custom tab titles and icons belong to the tab until it closes.
 
+The separate window groups linked worktrees under their repository, shows branch and ahead/behind counts, and offers independently scrollable Spaces and Agents sections. Use the sidebar chevron to show either section or both; right-click a Space for workspace and worktree actions. Removing a linked checkout requires confirmation, and a dirty checkout requires a separate force-removal confirmation. Closing a Space or group keeps its checkout files.
+
 The separate Herdr renderer currently does not display terminal graphics, support integrated SSH transport or drag daemon split dividers. This does not limit Kitty graphics in local MonoTerm PTYs. Adapted libraries and source provenance are documented in [vendor/herdr](vendor/herdr/README.md).
 
 ## Dependency pins
@@ -104,11 +108,13 @@ The Version settings revision passed 118 application tests (one opt-in test igno
 
 The 0.1.1 release passed 207 application/component tests (one opt-in ignored), strict all-target Clippy, formatting, eight native updater scenarios and Ed25519 signature tests. Focused native checks passed for Neovim local-file images and input scrolling (15), the original-position translucent Zen indicator (25), and viewport cursor visibility (14); all corresponding screenshots were inspected. Option-key GUI behavior remains unverified.
 
+The 0.2.0 release passed 231 application/component tests (one opt-in ignored), strict all-target/all-feature Clippy, formatting, eight native updater scenarios and Ed25519 signature tests. Focused native checks covered the worktree menu (33), sidebar views/tabs (22), WeType composition through metadata updates (12), Dark/Light sidebar colors and spacing (13 each), and inline branch counts at wide/narrow sidebar widths (11); the corresponding screenshots were inspected. The complete live-agent follow regression remains incomplete after a Codex bootstrap timeout. Cross-version download/install/relaunch is not claimed as verified.
+
 Native GUI checks require a logged-in, unlocked macOS desktop and Accessibility/Screen Recording access. Use separate test-owned windows and configurations. Never restart an existing user terminal as part of verification. Existing upstream Rust future-compatibility warnings may still appear.
 
 ## Scope
 
-MonoTerm is an early local macOS application. Session restoration, search, integrated SSH, per-session palettes and distribution notarization are not implemented. Native IME behavior and the complete live-agent follow workflow need further dedicated coverage. The application can close local jobs when a pane, tab or the app is closed.
+MonoTerm is an early local macOS application. Session restoration, search, integrated SSH, per-session palettes and distribution notarization are not implemented. Herdr Chinese composition has focused native WeType coverage, including metadata refreshes and commit/cancel; other input methods and the complete live-agent follow workflow need further dedicated coverage. The application can close local jobs when a pane, tab or the app is closed.
 
 ## Third-party notices
 

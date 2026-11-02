@@ -2,16 +2,17 @@
 use crate::{
     TerminalApp,
     appearance::Palette,
-    herdr_connection::{HerdrConnection, InputTarget, InputToken},
+    herdr_connection::{CompositionToken, HerdrConnection, InputTarget, InputToken},
     herdr_render::{self, CellPainter, GlyphCache},
     locale::Language,
-    toast, ui,
+    shell_surface, toast, ui,
+    window_chrome::{self, SHELL_INSET, SHELL_RADIUS, TOOLBAR_CENTER, TOOLBAR_HEIGHT},
 };
 use gpui::{
     App, Bounds, Context, DispatchPhase, ElementInputHandler, Entity, EntityInputHandler,
     FocusHandle, Font, InputHandler, KeyDownEvent, Modifiers, MouseButton, Pixels, Point, Render,
     Subscription, TextAlign, TextRun, UTF16Selection, Window, WindowHandle, canvas, div, fill,
-    point, prelude::*, px, rgb, rgba, size,
+    point, prelude::*, px, rgb, size,
 };
 use herdr_protocol::{
     ClientKeyCode, ClientKeyKind, ClientMouseButton, ClientMouseGeometry, ClientMouseKind,
@@ -21,10 +22,28 @@ use std::ops::Range;
 
 #[path = "herdr_chrome.rs"]
 mod chrome;
-#[path = "herdr_navigation.rs"]
-mod navigation;
+#[path = "herdr_indicators.rs"]
+mod indicators;
 #[path = "herdr_sidebar.rs"]
 mod sidebar;
+#[path = "herdr_sidebar_menu.rs"]
+mod sidebar_menu;
+#[path = "herdr_sidebar_style.rs"]
+mod sidebar_style;
+#[path = "herdr_workspace_menu.rs"]
+mod workspace_menu;
+
+/// The IME paints its marked text at the terminal cursor; a cursor quad there
+/// would cover the first preedit glyph.
+fn shows_terminal_cursor(focused: bool, composing: bool) -> bool {
+    focused && !composing
+}
+
+#[derive(Clone, Copy)]
+enum SidebarDrag {
+    Width,
+    Sections,
+}
 
 pub(crate) struct HerdrWindow {
     connection: Entity<HerdrConnection>,
@@ -38,14 +57,25 @@ pub(crate) struct HerdrWindow {
     blur_radius: u32,
     language: Language,
     sidebar_visible: bool,
+    sidebar_view: sidebar_menu::SidebarView,
+    sidebar_menu: Option<sidebar_menu::SidebarMenu>,
+    sidebar_style: sidebar_style::SidebarStyle,
+    sidebar_width: f32,
+    sidebar_ratio: f32,
+    sidebar_drag: Option<SidebarDrag>,
+    workspace_menu: Option<workspace_menu::WorkspaceMenu>,
+    shell_corners: shell_surface::CornerCache,
     sidebar_scroll: [gpui::ScrollHandle; 2],
+    collapsed_repos: std::collections::HashSet<String>,
     tab_scroll: gpui::ScrollHandle,
-    history: navigation::FocusHistory,
+    indicator_started: std::time::Instant,
+    indicator_elapsed: u128,
+    indicator_tick: Option<gpui::Task<()>>,
     bounds: Bounds<Pixels>,
     cell: gpui::Size<Pixels>,
     composition: String,
     composition_selection: Range<usize>,
-    composition_token: Option<InputToken>,
+    composition_token: Option<CompositionToken>,
     composition_cancelled: bool,
     cursor_bounds: Bounds<Pixels>,
     selection: Option<((u16, u16), (u16, u16))>,
@@ -74,19 +104,13 @@ impl HerdrWindow {
         cx: &mut Context<Self>,
     ) -> Self {
         let observation = cx.observe(&connection, |view, _, cx| {
-            let connection = view.connection.read(cx);
-            view.history.observe(
-                connection.snapshot.as_ref().map(|s| s.boot_id.as_str()),
-                connection
-                    .snapshot
-                    .as_ref()
-                    .and_then(|s| s.focused_pane_id.as_deref()),
-                connection.input_ready(),
-            );
-            if view.composition_token.is_some()
-                && view.composition_token != view.connection.read(cx).input_token()
+            if view
+                .composition_token
+                .as_ref()
+                .is_some_and(|token| !view.connection.read(cx).composition_is_current(token))
             {
                 view.composition.clear();
+                view.composition_selection = 0..0;
                 view.composition_cancelled = true;
             }
             if view.selection_token.is_some()
@@ -100,6 +124,9 @@ impl HerdrWindow {
             cx.notify();
         });
         let activation = cx.observe_window_activation(window, |view, window, cx| {
+            if !window.is_window_active() {
+                view.sidebar_drag = None;
+            }
             let result = view.connection.update(cx, |connection, cx| {
                 let result = connection.set_focus(window.is_window_active());
                 cx.notify();
@@ -132,9 +159,20 @@ impl HerdrWindow {
             blur_radius,
             language,
             sidebar_visible: true,
+            sidebar_view: sidebar_menu::SidebarView::default(),
+            sidebar_menu: None,
+            sidebar_style: sidebar_style::SidebarStyle::load(),
+            sidebar_width: window_chrome::SIDEBAR_WIDTH,
+            sidebar_ratio: 0.5,
+            sidebar_drag: None,
+            workspace_menu: None,
+            shell_corners: shell_surface::CornerCache::default(),
             sidebar_scroll: std::array::from_fn(|_| gpui::ScrollHandle::new()),
+            collapsed_repos: std::collections::HashSet::new(),
             tab_scroll: gpui::ScrollHandle::new(),
-            history: navigation::FocusHistory::default(),
+            indicator_started: std::time::Instant::now(),
+            indicator_elapsed: 0,
+            indicator_tick: None,
             bounds: Bounds::default(),
             cell: size(px(9.0), px(20.0)),
             composition: String::new(),
@@ -558,6 +596,39 @@ impl HerdrWindow {
         let on_move = window.listener_for(
             &cx.entity(),
             |view, event: &gpui::MouseMoveEvent, window, cx| {
+                if let Some(drag) = view.sidebar_drag {
+                    if event.pressed_button != Some(MouseButton::Left) {
+                        view.sidebar_drag = None;
+                    } else {
+                        match drag {
+                            SidebarDrag::Width => {
+                                view.sidebar_width = window_chrome::sidebar_width(
+                                    f32::from(event.position.x)
+                                        + window_chrome::SIDEBAR_HANDLE / 2.0,
+                                    f32::from(window.viewport_size().width),
+                                    window.scale_factor(),
+                                )
+                            }
+                            SidebarDrag::Sections => {
+                                let available = (f32::from(window.viewport_size().height)
+                                    - SHELL_INSET
+                                    - TOOLBAR_HEIGHT
+                                    - window_chrome::SECTION_HANDLE)
+                                    .max(1.0);
+                                let desired = f32::from(event.position.y)
+                                    - SHELL_INSET
+                                    - TOOLBAR_HEIGHT
+                                    - window_chrome::SECTION_HANDLE / 2.0;
+                                view.sidebar_ratio =
+                                    window_chrome::section_height(desired / available, available)
+                                        / available;
+                            }
+                        }
+                    }
+                    cx.notify();
+                    cx.stop_propagation();
+                    return;
+                }
                 if view.selecting {
                     if event.pressed_button == Some(MouseButton::Left) {
                         view.mouse(
@@ -584,6 +655,11 @@ impl HerdrWindow {
         let on_up = window.listener_for(
             &cx.entity(),
             |view, event: &gpui::MouseUpEvent, window, cx| {
+                if view.sidebar_drag.take().is_some() {
+                    cx.stop_propagation();
+                    cx.notify();
+                    return;
+                }
                 if view.selecting {
                     if let Some(button) = mouse_button(event.button) {
                         view.mouse(
@@ -674,12 +750,15 @@ impl HerdrWindow {
                     self.cell,
                 );
             }
+            let focused =
+                self.focus_handle.is_focused(window) && self.connection.read(cx).input_ready();
             painter.frame(
                 &surface.frame,
                 bounds.origin,
-                surface.popup.is_none()
-                    && self.focus_handle.is_focused(window)
-                    && self.connection.read(cx).input_ready(),
+                shows_terminal_cursor(
+                    surface.popup.is_none() && focused,
+                    !self.composition.is_empty(),
+                ),
                 &mut self.glyph_cache,
                 window,
                 cx,
@@ -696,7 +775,7 @@ impl HerdrWindow {
                 painter.frame(
                     &popup.frame,
                     origin,
-                    self.focus_handle.is_focused(window) && self.connection.read(cx).input_ready(),
+                    shows_terminal_cursor(focused, !self.composition.is_empty()),
                     &mut self.glyph_cache,
                     window,
                     cx,
@@ -768,19 +847,97 @@ impl HerdrWindow {
 
 impl Render for HerdrWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.update_workspace_dialog(window, cx);
+        let reduced_motion = crate::window_style::reduced_motion();
+        self.indicator_elapsed = if reduced_motion {
+            0
+        } else {
+            self.indicator_started.elapsed().as_millis()
+        };
+        let animate = !reduced_motion && window.is_window_active() && {
+            let connection = self.connection.read(cx);
+            connection.connected()
+                && connection.snapshot.as_ref().is_some_and(|snapshot| {
+                    let sidebar = window_chrome::show_sidebar(
+                        self.sidebar_visible,
+                        f32::from(window.viewport_size().width),
+                    );
+                    (sidebar
+                        && (snapshot
+                            .workspaces
+                            .iter()
+                            .any(|space| indicators::moving(space.agent_status))
+                            || snapshot.agents.iter().any(|agent| {
+                                indicators::moving(agent.agent_status)
+                                    && (snapshot.agent_view_label.is_none()
+                                        || snapshot.agent_order.contains(&agent.pane_id))
+                            })))
+                        || snapshot.tabs.iter().any(|tab| {
+                            Some(&tab.workspace_id) == snapshot.focused_workspace_id.as_ref()
+                                && indicators::moving(tab.agent_status)
+                        })
+                })
+        };
+        if animate && self.indicator_tick.is_none() {
+            self.indicator_tick = Some(cx.spawn(async move |view, cx| {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(70))
+                    .await;
+                if let Err(error) = view.update(cx, |view, cx| {
+                    view.indicator_tick = None;
+                    cx.notify();
+                }) {
+                    eprintln!("Update Herdr indicators: {error}");
+                }
+            }));
+        } else if !animate {
+            self.indicator_tick = None;
+        }
         let entity = cx.entity();
         let p = self.palette;
-        let status = self
-            .error
-            .clone()
-            .unwrap_or_else(|| self.connection.read(cx).status.clone());
+        let viewport = window.viewport_size();
+        let show_sidebar =
+            window_chrome::show_sidebar(self.sidebar_visible, f32::from(viewport.width));
+        let sidebar_width = window_chrome::sidebar_width(
+            self.sidebar_width,
+            f32::from(viewport.width),
+            window.scale_factor(),
+        );
+        if !show_sidebar {
+            self.sidebar_drag = None;
+        }
+        let shell_left = if show_sidebar {
+            sidebar_width
+        } else {
+            SHELL_INSET
+        };
+        let notice = self.error.clone().or_else(|| {
+            let connection = self.connection.read(cx);
+            connection
+                .mutation_error
+                .clone()
+                .or_else(|| (!connection.connected()).then(|| connection.status.clone()))
+        });
+        let workspace_menu = self.render_workspace_menu(window, cx);
+        let sidebar_menu = self.render_sidebar_menu(window, cx);
+        let background = shell_surface::background(
+            &mut self.shell_corners,
+            p,
+            shell_left,
+            false,
+            shell_surface::Surround::Theme,
+            window,
+        );
         div()
             .relative()
             .size_full()
             .flex()
             .flex_col()
-            .bg(rgba((p.shell << 8) | (p.alpha * 255.0) as u32))
+            .child(background)
+            .font_family(".SystemUIFont")
             .text_color(rgb(p.text))
+            .tab_group()
+            .tab_stop(false)
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(Self::key_down))
             .on_action(cx.listener(|view, _: &ui::FocusControls, window, cx| {
@@ -851,15 +1008,21 @@ impl Render for HerdrWindow {
                     cx.stop_propagation();
                 }),
             )
-            .child(self.chrome(cx))
+            .child(div().h(px(SHELL_INSET)).flex_none())
+            .child(self.chrome(show_sidebar, sidebar_width, cx))
             .child(
                 div()
                     .flex_1()
                     .min_h_0()
                     .min_w_0()
                     .flex()
-                    .when(self.sidebar_visible, |body| {
-                        body.child(self.sidebar(window, cx))
+                    .when(show_sidebar, |body| {
+                        body.child(self.sidebar(
+                            sidebar_width,
+                            f32::from(viewport.height) - SHELL_INSET - TOOLBAR_HEIGHT,
+                            cx,
+                        ))
+                        .child(self.sidebar_resize_handle(cx))
                     })
                     .child(
                         div()
@@ -867,7 +1030,12 @@ impl Render for HerdrWindow {
                             .flex_1()
                             .min_h_0()
                             .min_w_0()
+                            .when(!show_sidebar, |terminal| terminal.ml(px(SHELL_INSET)))
+                            .mr(px(SHELL_INSET))
+                            .mb(px(SHELL_INSET))
+                            .rounded_b(px(SHELL_RADIUS))
                             .overflow_hidden()
+                            .p(px(4.0))
                             .on_any_mouse_down(cx.listener(
                                 |view, event: &gpui::MouseDownEvent, window, cx| {
                                     view.focus_handle.focus(window, cx);
@@ -964,14 +1132,27 @@ impl Render for HerdrWindow {
                             ),
                     ),
             )
-            .child(self.status_bar(status, cx))
+            .when_some(notice, |root, notice| {
+                root.child(
+                    div()
+                        .absolute()
+                        .bottom(px(14.0))
+                        .right(px(16.0))
+                        .max_w(px((f32::from(viewport.width) - 32.0).min(480.0)))
+                        .p_2()
+                        .rounded(px(6.0))
+                        .bg(rgb(p.panel))
+                        .text_size(px(11.0))
+                        .child(self.language.dynamic_text(&notice)),
+                )
+            })
             .child(
                 toast::layer(&self.toast, p, cx)
-                    .top(px((chrome::HEADER_HEIGHT - 24.0) / 2.0))
-                    .when(self.sidebar_visible, |layer| {
-                        layer.left(px(sidebar::SIDEBAR_WIDTH))
-                    }),
+                    .top(px(TOOLBAR_CENTER - 12.0))
+                    .left(px(shell_left)),
             )
+            .children(workspace_menu)
+            .children(sidebar_menu)
     }
 }
 
@@ -1084,28 +1265,28 @@ impl EntityInputHandler for HerdrWindow {
         if std::mem::take(&mut self.composition_cancelled) {
             self.composition_token = None;
             self.composition.clear();
+            self.composition_selection = 0..0;
             self.error = Some("Input cancelled because the selected terminal changed".into());
             cx.notify();
             return;
         }
-        let token = self
-            .composition_token
-            .take()
-            .or_else(|| self.connection.read(cx).input_token());
-        if !self.composition.is_empty() {
-            self.composition.clear();
-            cx.notify();
-        }
+        let token = self.composition_token.take();
+        self.composition.clear();
         self.composition_selection = 0..0;
+        cx.notify();
         if let Some(token) = token {
-            self.send_to(
-                Some(&token),
-                ClientPaneInputEvent::TextCommit(text.into()),
-                cx,
-            );
+            self.selection = None;
+            self.selecting = false;
+            self.selection_dragged = false;
+            self.selection_token = None;
+            let result = self.connection.update(cx, |connection, cx| {
+                let result = connection.send_composition_to(&token, text.into());
+                cx.notify();
+                result
+            });
+            self.record(result, cx);
         } else {
-            self.error = Some("Waiting for the selected terminal".into());
-            cx.notify();
+            self.send(ClientPaneInputEvent::TextCommit(text.into()), cx);
         }
     }
     fn replace_and_mark_text_in_range(
@@ -1119,8 +1300,21 @@ impl EntityInputHandler for HerdrWindow {
         if !self.focus_handle.is_focused(window) {
             return;
         }
+        if text.is_empty() {
+            self.unmark_text(window, cx);
+            return;
+        }
+        // After a real destination change, discard the rest of this IME session
+        // rather than attaching its next update to a different terminal.
+        if self.composition_cancelled {
+            return;
+        }
         if self.composition_token.is_none() {
-            self.composition_token = self.connection.read(cx).input_token();
+            self.composition_token = self.connection.read(cx).composition_token();
+            if self.composition_token.is_none() {
+                self.composition_cancelled = true;
+                return;
+            }
         }
         self.composition = text.into();
         let end = text.encode_utf16().count();
@@ -1235,6 +1429,13 @@ mod tests {
         assert!(key_event(&event("a", false)).is_none());
         assert!(key_event(&event("shift-a", false)).is_none());
         assert!(key_event(&event("space", false)).is_none());
+    }
+
+    #[test]
+    fn composition_hides_the_terminal_cursor_until_it_ends() {
+        assert!(shows_terminal_cursor(true, false));
+        assert!(!shows_terminal_cursor(true, true));
+        assert!(!shows_terminal_cursor(false, false));
     }
 
     #[test]

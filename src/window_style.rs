@@ -69,6 +69,18 @@ mod mac {
         Ok(())
     }
 
+    pub fn reduced_motion() -> bool {
+        let Some(class) = Class::get("NSWorkspace") else {
+            return false;
+        };
+        // SAFETY: AppKit's shared workspace is queried synchronously on the UI thread.
+        unsafe {
+            let workspace: *mut Object = msg_send![class, sharedWorkspace];
+            let reduced: BOOL = msg_send![workspace, accessibilityDisplayShouldReduceMotion];
+            reduced != NO
+        }
+    }
+
     pub fn set_zen(window: &gpui::Window, zen: bool) -> Result<(), String> {
         with_window(window, |native| {
             // SAFETY: Standard NSWindowButton values are close=0, minimize=1, zoom=2.
@@ -128,7 +140,12 @@ mod mac {
 }
 
 #[cfg(target_os = "macos")]
-pub use mac::{set_application_icon, set_blur_radius, set_zen};
+pub use mac::{reduced_motion, set_application_icon, set_blur_radius, set_zen};
+
+#[cfg(not(target_os = "macos"))]
+pub fn reduced_motion() -> bool {
+    false
+}
 
 pub fn apply_material(window: &mut gpui::Window, alpha: f32, radius: u32) -> Result<(), String> {
     use gpui::WindowBackgroundAppearance;

@@ -86,10 +86,16 @@ pub struct Palette {
     pub muted: u32,
     pub subtle: u32,
     pub accent: u32,
+    /// Herdr sidebar branch, agent type and agent-context text.
+    pub sidebar_detail: u32,
+    /// Herdr sidebar linked-worktree row titles.
+    pub sidebar_child: u32,
     /// Configured opacity in 0..=1. Light themes are always fully opaque.
     pub alpha: f32,
     /// Whether the host should enable its native glass effect.
     pub glass: bool,
+    /// Herdr rows over an opaque-enough material keep full selection contrast.
+    rows: bool,
 }
 
 impl Palette {
@@ -106,6 +112,16 @@ impl Palette {
         mix_rgb(self.shell, self.accent, if self.dark { 0.20 } else { 0.10 })
     }
 
+    /// Herdr's sidebar uses theme-colored controls and half the frame transparency.
+    pub fn herdr_sidebar(self) -> Self {
+        Self {
+            accent: self.text,
+            alpha: 1.0 - (1.0 - self.alpha) * 0.5,
+            rows: true,
+            ..self
+        }
+    }
+
     pub fn tab_background(self, selected: bool, hovered: bool) -> u32 {
         let alpha = match (selected, hovered, self.dark) {
             (true, true, true) => 42,
@@ -118,7 +134,7 @@ impl Palette {
         };
         // The pinned renderer adds layer alpha. Leave part of the backdrop
         // visible even when the configured surround is almost opaque.
-        let alpha = if self.dark && self.outer_alpha() < 1.0 {
+        let alpha = if !self.rows && self.dark && self.outer_alpha() < 1.0 {
             let remaining = (1.0 - self.outer_alpha()) * 255.0;
             let fraction = if selected {
                 if hovered { 0.6 } else { 0.45 }
@@ -131,6 +147,16 @@ impl Palette {
         };
         // A small foreground mix keeps custom very dark/light accents visible.
         (mix_rgb(self.accent, self.text, 0.12) << 8) | alpha
+    }
+
+    /// Tree guides sit above the faint border but below row text.
+    pub fn tree_guide(self) -> u32 {
+        mix_rgb(self.border, self.muted, 0.4)
+    }
+
+    /// Section headings sit below row detail text in emphasis.
+    pub fn section_heading(self) -> u32 {
+        mix_rgb(self.muted, 0x000000, 0.18)
     }
 
     /// Momentary hover treatment shared by buttons, rows and menu actions.
@@ -200,8 +226,11 @@ impl Appearance {
                 muted: hsl(h, s * 0.1, 0.64),
                 subtle: hsl(h, s * 0.1, 0.45),
                 accent: appearance.accent,
+                sidebar_detail: 0x5e6a9c,
+                sidebar_child: 0xbdc8f6,
                 alpha: appearance.opacity / 100.0,
                 glass: appearance.main_glass,
+                rows: false,
             }
         } else {
             // Keep the dark-mode lightness preference dormant in light mode.
@@ -220,8 +249,11 @@ impl Appearance {
                 muted: hsl(h, s * 0.1, 0.35),
                 subtle: hsl(h, s * 0.1, 0.48),
                 accent: light_accent(appearance.accent),
+                sidebar_detail: 0x455687,
+                sidebar_child: 0x2f4393,
                 alpha: 1.0,
                 glass: false,
+                rows: false,
             }
         }
     }
@@ -577,6 +609,86 @@ mod tests {
     }
 
     #[test]
+    fn herdr_sidebar_text_tints_keep_reference_colors_across_surface_hues() {
+        let channels = |color: u32| ((color >> 16) & 0xff, (color >> 8) & 0xff, color & 0xff);
+        for theme in [Theme::Dark, Theme::Light] {
+            let appearance = Appearance {
+                theme,
+                ..Appearance::default()
+            };
+            let palette = appearance.palette(true);
+            for hue in [0.0, 120.0, 220.0, 240.0] {
+                let changed = Appearance { hue, ..appearance }.palette(true);
+                assert_eq!(changed.sidebar_detail, palette.sidebar_detail);
+                assert_eq!(changed.sidebar_child, palette.sidebar_child);
+            }
+            let (red, green, blue) = channels(palette.sidebar_detail);
+            assert!(
+                blue > green && green > red,
+                "detail keeps its blue-gray hue"
+            );
+            let detail = red + green + blue;
+            let child = {
+                let (red, green, blue) = channels(palette.sidebar_child);
+                red + green + blue
+            };
+            if theme == Theme::Dark {
+                assert!(child > detail, "linked titles read brighter than details");
+            } else {
+                assert!(child < detail, "linked titles read darker on Light");
+            }
+            let sidebar = palette.herdr_sidebar();
+            assert_eq!(sidebar.sidebar_detail, palette.sidebar_detail);
+            assert_eq!(sidebar.sidebar_child, palette.sidebar_child);
+        }
+    }
+
+    #[test]
+    fn section_headings_are_dimmer_than_muted_text() {
+        let channels = |color: u32| ((color >> 16) & 0xff) + ((color >> 8) & 0xff) + (color & 0xff);
+        for theme in [Theme::Dark, Theme::Light] {
+            let palette = Appearance {
+                theme,
+                ..Appearance::default()
+            }
+            .palette(true);
+            assert!(channels(palette.section_heading()) < channels(palette.muted));
+        }
+    }
+
+    #[test]
+    fn herdr_sidebar_halves_frame_transparency_without_changing_theme_colors() {
+        for opacity in [0.0, 60.0, 85.0, 100.0] {
+            for theme in [Theme::Dark, Theme::Light] {
+                let palette = Appearance {
+                    opacity,
+                    theme,
+                    ..Appearance::default()
+                }
+                .palette(true);
+                let sidebar = palette.herdr_sidebar();
+                assert_eq!(sidebar.shell, palette.shell);
+                assert_eq!(sidebar.accent, palette.text);
+                assert!(
+                    ((1.0 - sidebar.outer_alpha()) - (1.0 - palette.outer_alpha()) * 0.5).abs()
+                        < 0.00001
+                );
+                if theme == Theme::Light {
+                    assert_eq!(sidebar.outer_alpha(), 1.0);
+                }
+                if theme == Theme::Dark && opacity < 100.0 {
+                    // Rows keep their designed contrast even though the material is denser.
+                    assert_eq!(sidebar.tab_background(true, false) & 0xff, 32);
+                    assert!((palette.tab_background(true, false) & 0xff) <= 32);
+                    if opacity == 85.0 {
+                        assert!((palette.tab_background(true, false) & 0xff) < 32);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn accent_is_independent_and_legacy_preferences_keep_their_material() {
         let legacy: Appearance =
             serde_json::from_str(r#"{"hue":280,"opacity":40,"blur_radius":12}"#).unwrap();
@@ -624,6 +736,26 @@ mod tests {
             assert!(selected < selected_hover);
             assert_eq!(p.tab_background(true, false), p.control_selected(false));
             assert_eq!(p.tab_background(true, true), p.control_selected(true));
+        }
+    }
+
+    #[test]
+    fn tree_guides_are_clearer_than_borders_without_matching_text() {
+        for theme in [Theme::Dark, Theme::Light] {
+            let palette = Appearance {
+                theme,
+                opacity: 100.0,
+                main_glass: false,
+                ..Appearance::default()
+            }
+            .palette(true);
+            let channel = |color: u32| ((color >> 8) & 0xff) as i32;
+            let guide = channel(palette.tree_guide());
+            let border = channel(palette.border);
+            let muted = channel(palette.muted);
+            assert!(guide > border.min(muted) && guide < border.max(muted));
+            assert!((guide - channel(palette.shell)).abs() >= 20);
+            assert!((guide - muted).abs() >= 20);
         }
     }
 

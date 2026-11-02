@@ -9,8 +9,9 @@
 //! Navigation and activation require correlated successful API responses, then
 //! a matching surface. Input is never buffered here or replayed after failure.
 //! Shell mutations use that same fence: accepted requests gate input at once.
-//! For asynchronous clipboard/IME acquisition, capture an `InputToken` before
-//! starting work and pass it to `send_input_to` when the work completes.
+//! Clipboard acquisition uses an `InputToken` tied to the displayed projection.
+//! IME composition uses a `CompositionToken` that survives metadata refreshes,
+//! but is invalidated by changes to its destination or connection.
 
 use herdr_client::{
     Client, ClientEvent, ConnectOptions, ConnectTarget, HostTheme, Method, SurfaceImages,
@@ -42,6 +43,14 @@ pub struct InputToken {
     epoch: u64,
     boot_id: String,
     projection_revision: u64,
+    target: InputTarget,
+}
+
+/// IME text belongs to a terminal, not to a particular metadata revision.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CompositionToken {
+    epoch: u64,
+    boot_id: String,
     target: InputTarget,
 }
 
@@ -80,10 +89,80 @@ impl NavigationTarget {
     }
 }
 
+#[derive(Clone)]
+pub struct WorkspaceTarget {
+    pub boot_id: String,
+    pub workspace: herdr_protocol::ClientShellWorkspace,
+    pub close_members: Vec<String>,
+}
+
+impl WorkspaceTarget {
+    pub fn new(
+        snapshot: &ClientShellSnapshot,
+        workspace: &herdr_protocol::ClientShellWorkspace,
+    ) -> Self {
+        Self {
+            boot_id: snapshot.boot_id.clone(),
+            workspace: workspace.clone(),
+            close_members: workspace_close_members(&snapshot.workspaces, workspace),
+        }
+    }
+
+    pub fn validate(&self, snapshot: &ClientShellSnapshot) -> Result<(), String> {
+        let current = snapshot
+            .workspaces
+            .iter()
+            .find(|space| space.workspace_id == self.workspace.workspace_id)
+            .ok_or("Herdr workspace is no longer present")?;
+        if snapshot.boot_id != self.boot_id
+            || current.new_workspace_cwd != self.workspace.new_workspace_cwd
+            || current.worktree != self.workspace.worktree
+        {
+            return Err("Herdr workspace destination changed; reopen its menu".into());
+        }
+        Ok(())
+    }
+}
+
+// Match Herdr's close scope: the last parent closes its linked-worktree group.
+fn workspace_close_members(
+    spaces: &[herdr_protocol::ClientShellWorkspace],
+    workspace: &herdr_protocol::ClientShellWorkspace,
+) -> Vec<String> {
+    let alone = || vec![workspace.workspace_id.clone()];
+    let Some(tree) = workspace
+        .worktree
+        .as_ref()
+        .filter(|tree| !tree.is_linked_worktree)
+    else {
+        return alone();
+    };
+    let mut members = Vec::new();
+    for other in spaces {
+        if let Some(other_tree) = &other.worktree
+            && other_tree.key == tree.key
+        {
+            if other.workspace_id != workspace.workspace_id && !other_tree.is_linked_worktree {
+                return alone();
+            }
+            members.push(other.workspace_id.clone());
+        }
+    }
+    members.sort();
+    members
+}
+
+pub enum WorkspaceAction<'a> {
+    NewTab,
+    Rename(&'a str),
+    Close(&'a [String]),
+}
+
 enum ShellMutation<'a> {
     CreateTab,
     CloseTab(&'a str),
     CreateWorkspace,
+    Workspace(&'a WorkspaceTarget, WorkspaceAction<'a>),
 }
 
 impl ShellMutation<'_> {
@@ -98,6 +177,52 @@ impl ShellMutation<'_> {
                 .ok_or_else(|| "Herdr focused workspace is no longer present".to_string())
         });
         match self {
+            Self::Workspace(target, action) => {
+                target.validate(snapshot)?;
+                let id = &target.workspace.workspace_id;
+                match action {
+                    WorkspaceAction::NewTab => Ok((
+                        Method::TabCreate,
+                        json!({"workspace_id": id, "focus": true}),
+                    )),
+                    WorkspaceAction::Rename(label) => {
+                        let label = label.trim();
+                        if label.is_empty() {
+                            return Err("Space name cannot be empty".into());
+                        }
+                        Ok((
+                            Method::WorkspaceRename,
+                            json!({"workspace_id": id, "label": label}),
+                        ))
+                    }
+                    WorkspaceAction::Close(expected_panes) => {
+                        if workspace_close_members(&snapshot.workspaces, &target.workspace)
+                            != target.close_members
+                        {
+                            return Err("Space group changed; reopen the close confirmation".into());
+                        }
+                        let mut panes: Vec<_> = snapshot
+                            .panes
+                            .iter()
+                            .filter(|pane| target.close_members.contains(&pane.workspace_id))
+                            .map(|pane| pane.pane_id.clone())
+                            .collect();
+                        panes.sort();
+                        if panes != *expected_panes {
+                            return Err(
+                                "Space terminals changed; reopen the close confirmation".into()
+                            );
+                        }
+                        Ok((
+                            Method::WorkspaceClose,
+                            json!({
+                                "workspace_id": id,
+                                "close_group": target.close_members.len() > 1,
+                            }),
+                        ))
+                    }
+                }
+            }
             Self::CreateTab => {
                 let workspace = workspace.ok_or("Herdr has no focused workspace")??;
                 Ok((
@@ -141,6 +266,18 @@ struct Fence {
     started: Instant,
 }
 
+struct DialogRequest {
+    id: String,
+    method: Method,
+    response: Option<Result<Value, String>>,
+}
+
+impl DialogRequest {
+    fn mutating(&self) -> bool {
+        self.method != Method::WorktreeList && self.response.is_none()
+    }
+}
+
 pub struct HerdrConnection {
     pub boot_id: Option<String>,
     pub snapshot: Option<Arc<ClientShellSnapshot>>,
@@ -149,6 +286,8 @@ pub struct HerdrConnection {
     pub display_surface: Option<Arc<PaneSurfaceFrame>>,
     pub images: Option<Arc<SurfaceImages>>,
     pub status: String,
+    pub mutation_error: Option<String>,
+    dialog: Option<DialogRequest>,
     socket: PathBuf,
     client: Option<Client>,
     welcomed: bool,
@@ -156,6 +295,7 @@ pub struct HerdrConnection {
     next_retry: Option<Instant>,
     backoff: Duration,
     epoch: u64,
+    composition_epoch: u64,
     desired_active: bool,
     acknowledged_active: bool,
     desired_focus: bool,
@@ -208,6 +348,8 @@ impl HerdrConnection {
             display_surface: None,
             images: None,
             status: "Connecting".into(),
+            mutation_error: None,
+            dialog: None,
             socket,
             client: None,
             welcomed: false,
@@ -215,6 +357,7 @@ impl HerdrConnection {
             next_retry: None,
             backoff: INITIAL_BACKOFF,
             epoch: 0,
+            composition_epoch: 0,
             desired_active: active,
             acknowledged_active: false,
             desired_focus: active,
@@ -390,6 +533,64 @@ impl HerdrConnection {
         })
     }
 
+    pub fn composition_token(&self) -> Option<CompositionToken> {
+        let input = self.input_token()?;
+        Some(self.composition_identity(&input))
+    }
+
+    fn composition_identity(&self, input: &InputToken) -> CompositionToken {
+        CompositionToken {
+            epoch: self.composition_epoch,
+            boot_id: input.boot_id.clone(),
+            target: input.target.clone(),
+        }
+    }
+
+    pub fn composition_is_current(&self, token: &CompositionToken) -> bool {
+        self.connected() && self.composition_destination_matches(token)
+    }
+
+    fn composition_destination_matches(&self, token: &CompositionToken) -> bool {
+        if token.epoch != self.composition_epoch
+            || self.boot_id.as_deref() != Some(token.boot_id.as_str())
+        {
+            return false;
+        }
+        // A metadata snapshot may arrive before its surface. Keep marked text
+        // during that gap; committing still requires a current, ready surface.
+        match &token.target {
+            InputTarget::Pane(id) => self
+                .snapshot
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.focused_pane_id.as_ref() == Some(id)),
+            InputTarget::Popup(id) => self
+                .display_surface
+                .as_ref()
+                .and_then(|surface| surface.popup.as_ref())
+                .is_some_and(|popup| &popup.terminal_id == id),
+        }
+    }
+
+    pub fn send_composition_to(
+        &mut self,
+        token: &CompositionToken,
+        text: String,
+    ) -> Result<(), String> {
+        self.poll();
+        if !self.events_drained() || !self.composition_is_current(token) {
+            return Err("Herdr input destination changed or is not ready".into());
+        }
+        let input = self
+            .projected_composition_input(token)
+            .ok_or("Herdr input is not ready")?;
+        self.queue_input(&input, [ClientPaneInputEvent::TextCommit(text)])
+    }
+
+    fn projected_composition_input(&self, token: &CompositionToken) -> Option<InputToken> {
+        self.projected_token()
+            .filter(|input| self.composition_identity(input) == *token)
+    }
+
     /// Input from a synchronous UI event. Captures the displayed destination
     /// before polling; a focus change discovered by polling rejects this event.
     pub fn send_input(
@@ -413,6 +614,14 @@ impl HerdrConnection {
         if !self.events_drained() || self.input_token().as_ref() != Some(token) {
             return Err("Herdr input destination changed or is not ready".into());
         }
+        self.queue_input(token, events)
+    }
+
+    fn queue_input(
+        &self,
+        token: &InputToken,
+        events: impl IntoIterator<Item = ClientPaneInputEvent>,
+    ) -> Result<(), String> {
         let handle = &self.client.as_ref().ok_or("Herdr is disconnected")?.handle;
         let result = match &token.target {
             InputTarget::Pane(id) => handle.send_input(&token.boot_id, id, events),
@@ -454,7 +663,132 @@ impl HerdrConnection {
         self.mutate_shell(ShellMutation::CreateWorkspace)
     }
 
+    pub fn workspace_action(
+        &mut self,
+        target: &WorkspaceTarget,
+        action: WorkspaceAction<'_>,
+    ) -> Result<(), String> {
+        self.mutate_shell(ShellMutation::Workspace(target, action))
+    }
+
+    /// One correlated dialog request at a time. Dismissing its UI does not cancel
+    /// the daemon operation, and reconnecting never replays it.
+    pub fn request_worktree(
+        &mut self,
+        target: &WorkspaceTarget,
+        method: Method,
+        params: Value,
+    ) -> Result<String, String> {
+        if !matches!(
+            method,
+            Method::WorktreeList
+                | Method::WorktreeCreate
+                | Method::WorktreeOpen
+                | Method::WorktreeRemove
+        ) {
+            return Err("Unsupported worktree request".into());
+        }
+        let snapshot = self.snapshot.clone().ok_or("Herdr has no snapshot")?;
+        target.validate(&snapshot)?;
+        let epoch = self.epoch;
+        self.poll();
+        self.validate_mutation_snapshot(&snapshot, epoch)?;
+        if !self.connected()
+            || !self.events_drained()
+            || self.fence.is_some()
+            || self.needs_barrier
+            || self
+                .dialog
+                .as_ref()
+                .is_some_and(|request| request.response.is_none())
+        {
+            return Err("Herdr is awaiting a pending request; try again".into());
+        }
+        let id = self
+            .client
+            .as_ref()
+            .ok_or("Herdr is disconnected")?
+            .handle
+            .request(&snapshot.boot_id, method, params)
+            .map_err(|error| error.to_string())?;
+        self.dialog = Some(DialogRequest {
+            id: id.clone(),
+            method,
+            response: None,
+        });
+        if method != Method::WorktreeList {
+            self.invalidate_input();
+            self.surface = None;
+            self.needs_barrier = true;
+        }
+        Ok(id)
+    }
+
+    pub fn take_worktree_response(&mut self, id: &str) -> Option<Result<Value, String>> {
+        let request = self.dialog.as_mut().filter(|request| request.id == id)?;
+        let response = request.response.take()?;
+        self.dialog = None;
+        Some(response)
+    }
+
+    fn accept_dialog_response(&mut self, id: &str, response: &Value) -> bool {
+        let Some(request) = self
+            .dialog
+            .as_ref()
+            .filter(|request| request.id == id && request.response.is_none())
+        else {
+            return false;
+        };
+        let method = request.method;
+        let mut result = if response["id"].as_str() == Some(id)
+            && (response["result"].is_object() || response["error"].is_object())
+        {
+            Ok(response.clone())
+        } else {
+            Err("Unexpected Herdr response; review workspace state before retrying".into())
+        };
+        if matches!(method, Method::WorktreeCreate | Method::WorktreeOpen)
+            && result.is_ok()
+            && response["error"].is_null()
+        {
+            let expected = if method == Method::WorktreeCreate {
+                "worktree_created"
+            } else {
+                "worktree_opened"
+            };
+            if let Some(workspace) = response["result"]["workspace"]["workspace_id"]
+                .as_str()
+                .filter(|id| !id.is_empty() && response["result"]["type"] == expected)
+            {
+                // Focus is local to this binary client. The daemon's focus=true
+                // alone does not move this client's selected terminal.
+                let boot = self.boot_id.clone().unwrap_or_default();
+                self.needs_barrier = false;
+                if let Err(error) = self.request_focus_change(
+                    &boot,
+                    Method::WorkspaceFocus,
+                    json!({"workspace_id": workspace}),
+                    Some(NavigationTarget::Workspace(workspace.into())),
+                    "Opening worktree",
+                ) {
+                    result = Err(format!(
+                        "Worktree exists, but could not be focused: {error}"
+                    ));
+                }
+            } else {
+                result = Err(
+                    "Unexpected worktree response; review workspace state before retrying".into(),
+                );
+            }
+        }
+        if let Some(request) = &mut self.dialog {
+            request.response = Some(result);
+        }
+        true
+    }
+
     fn mutate_shell(&mut self, mutation: ShellMutation<'_>) -> Result<(), String> {
+        self.mutation_error = None;
         let snapshot = self.snapshot.clone().ok_or("Herdr has no snapshot")?;
         let epoch = self.epoch;
         let (method, params) = mutation.request(&snapshot)?;
@@ -463,13 +797,19 @@ impl HerdrConnection {
             return Err("Herdr is not ready to change tabs or workspaces".into());
         }
         self.validate_mutation_snapshot(&snapshot, epoch)?;
-        if self.fence.is_some() || self.needs_barrier {
+        if self.fence.is_some()
+            || self.needs_barrier
+            || self.dialog.as_ref().is_some_and(DialogRequest::mutating)
+        {
             return Err("Herdr focus is awaiting acknowledgement".into());
         }
         let status = match mutation {
             ShellMutation::CreateTab => "Creating tab",
             ShellMutation::CloseTab(_) => "Closing tab",
             ShellMutation::CreateWorkspace => "Creating workspace",
+            ShellMutation::Workspace(_, WorkspaceAction::NewTab) => "Creating tab",
+            ShellMutation::Workspace(_, WorkspaceAction::Rename(_)) => "Renaming workspace",
+            ShellMutation::Workspace(_, WorkspaceAction::Close(_)) => "Closing workspace",
         };
         self.request_focus_change(&snapshot.boot_id, method, params, None, status)
     }
@@ -493,7 +833,10 @@ impl HerdrConnection {
         if !self.connected() || !self.events_drained() {
             return Err("Herdr is not ready to change focus".into());
         }
-        if self.fence.is_some() || self.needs_barrier {
+        if self.fence.is_some()
+            || self.needs_barrier
+            || self.dialog.as_ref().is_some_and(DialogRequest::mutating)
+        {
             return Err("Herdr focus is awaiting acknowledgement".into());
         }
         let (boot_id, known, already_focused) = {
@@ -654,9 +997,15 @@ impl HerdrConnection {
 
     fn invalidate_input(&mut self) {
         self.epoch = self.epoch.wrapping_add(1);
+        self.composition_epoch = self.composition_epoch.wrapping_add(1);
     }
 
     fn clear_connection(&mut self) {
+        if let Some(request) = &mut self.dialog
+            && request.response.is_none()
+        {
+            request.response = Some(Err("Herdr disconnected; the operation was not replayed. Review workspace state before retrying.".into()));
+        }
         if let Some(client) = self.client.take() {
             client.handle.disconnect();
         }
@@ -700,7 +1049,11 @@ impl HerdrConnection {
 
     // Control preferences may be coalesced, but neither input nor navigation is.
     fn drive(&mut self, now: Instant) -> bool {
-        if !self.connected() || self.boot_id.is_none() || self.fence.is_some() {
+        if !self.connected()
+            || self.boot_id.is_none()
+            || self.fence.is_some()
+            || self.dialog.as_ref().is_some_and(DialogRequest::mutating)
+        {
             return false;
         }
         if !self.theme_sent
@@ -790,12 +1143,29 @@ impl HerdrConnection {
                     self.failed("Snapshot identity changed".into(), now);
                     return;
                 }
-                if self
+                let destination_changed = self.snapshot.as_ref().is_none_or(|old| {
+                    old.focused_workspace_id != snapshot.focused_workspace_id
+                        || old.focused_tab_id != snapshot.focused_tab_id
+                        || old.focused_pane_id != snapshot.focused_pane_id
+                        || snapshot.focused_pane_id.as_ref().is_some_and(|id| {
+                            let owner =
+                                |state: &ClientShellSnapshot| {
+                                    state.panes.iter().find(|pane| &pane.pane_id == id).map(
+                                        |pane| (pane.workspace_id.clone(), pane.tab_id.clone()),
+                                    )
+                                };
+                            owner(old) != owner(&snapshot)
+                        })
+                });
+                if destination_changed {
+                    self.invalidate_input();
+                } else if self
                     .snapshot
                     .as_ref()
-                    .is_none_or(|old| old.as_ref() != snapshot.as_ref())
+                    .is_some_and(|old| old.as_ref() != snapshot.as_ref())
                 {
-                    self.invalidate_input();
+                    // Pointer/clipboard input still belongs to an exact projection.
+                    self.epoch = self.epoch.wrapping_add(1);
                 }
                 if self.surface.as_ref().is_some_and(|surface| {
                     surface.boot_id != snapshot.boot_id
@@ -818,7 +1188,7 @@ impl HerdrConnection {
                     return;
                 }
                 let popup_changed = self
-                    .surface
+                    .display_surface
                     .as_ref()
                     .and_then(|s| s.popup.as_ref())
                     .map(|p| p.terminal_id.as_str())
@@ -835,12 +1205,18 @@ impl HerdrConnection {
                 request_id,
                 response,
             } => {
+                if self.accept_dialog_response(&request_id, &response) {
+                    return;
+                }
                 if let Err(reason) = self.acknowledge(&request_id, &response) {
+                    self.mutation_error = Some(reason.clone());
                     self.failed(reason, now);
                 }
             }
             ClientEvent::CommandRejected { reason, .. } => {
-                self.failed(format!("Command rejected: {reason}"), now);
+                let reason = format!("Command rejected: {reason}");
+                self.mutation_error = Some(reason.clone());
+                self.failed(reason, now);
             }
             ClientEvent::Disconnected { reason, .. } => self.failed(reason, now),
             ClientEvent::VersionMismatch(_) => {
@@ -860,8 +1236,15 @@ impl HerdrConnection {
         if !is_focus && !is_activation {
             return Err("Herdr response does not match the pending request".into());
         }
+        if let Some(error) = response.get("error").filter(|error| !error.is_null()) {
+            let message = error
+                .get("message")
+                .and_then(Value::as_str)
+                .or_else(|| error.get("code").and_then(Value::as_str))
+                .unwrap_or("Request rejected");
+            return Err(format!("Herdr: {}", display_reason(message)));
+        }
         if response.get("id").and_then(Value::as_str) != Some(id)
-            || response.get("error").is_some_and(|value| !value.is_null())
             || !response.get("result").is_some_and(Value::is_object)
         {
             return Err("Herdr rejected the focus or surface request".into());
@@ -1129,6 +1512,136 @@ mod tests {
     }
 
     #[test]
+    fn workspace_menu_actions_keep_the_clicked_identity_and_close_scope() {
+        let mut snapshot = (*snapshot()).clone();
+        let target = WorkspaceTarget {
+            boot_id: snapshot.boot_id.clone(),
+            workspace: snapshot.workspaces[0].clone(),
+            close_members: vec!["w1".into()],
+        };
+        snapshot.focused_workspace_id = Some("another-space".into());
+        assert_eq!(
+            ShellMutation::Workspace(&target, WorkspaceAction::NewTab)
+                .request(&snapshot)
+                .unwrap(),
+            (
+                Method::TabCreate,
+                json!({"workspace_id": "w1", "focus": true})
+            )
+        );
+        assert_eq!(
+            ShellMutation::Workspace(&target, WorkspaceAction::Rename("  中文 Space  "))
+                .request(&snapshot)
+                .unwrap(),
+            (
+                Method::WorkspaceRename,
+                json!({"workspace_id": "w1", "label": "中文 Space"})
+            )
+        );
+        assert!(
+            ShellMutation::Workspace(&target, WorkspaceAction::Rename("  "))
+                .request(&snapshot)
+                .is_err()
+        );
+        let mut panes: Vec<_> = snapshot
+            .panes
+            .iter()
+            .filter(|pane| pane.workspace_id == "w1")
+            .map(|pane| pane.pane_id.clone())
+            .collect();
+        panes.sort();
+        assert_eq!(
+            ShellMutation::Workspace(&target, WorkspaceAction::Close(&panes))
+                .request(&snapshot)
+                .unwrap(),
+            (
+                Method::WorkspaceClose,
+                json!({"workspace_id": "w1", "close_group": false})
+            )
+        );
+        assert!(
+            ShellMutation::Workspace(&target, WorkspaceAction::Close(&[]))
+                .request(&snapshot)
+                .is_err()
+        );
+        // A parent that heads its repository group closes the whole group, as
+        // the daemon expects; a lone workspace keeps close_group off.
+        let mut group = target.clone();
+        group
+            .workspace
+            .worktree
+            .as_mut()
+            .unwrap()
+            .is_linked_worktree = false;
+        snapshot.workspaces[0] = group.workspace.clone();
+        group.close_members.push("w2".into());
+        let mut member = snapshot.workspaces[0].clone();
+        member.workspace_id = "w2".into();
+        member.worktree.as_mut().unwrap().is_linked_worktree = true;
+        snapshot.workspaces.push(member);
+        let mut member_pane = snapshot.panes[0].clone();
+        member_pane.pane_id = "w2:p1".into();
+        member_pane.workspace_id = "w2".into();
+        snapshot.panes.push(member_pane);
+        let mut group_panes = panes.clone();
+        group_panes.push("w2:p1".into());
+        assert_eq!(
+            ShellMutation::Workspace(&group, WorkspaceAction::Close(&group_panes))
+                .request(&snapshot)
+                .unwrap(),
+            (
+                Method::WorkspaceClose,
+                json!({"workspace_id": "w1", "close_group": true})
+            )
+        );
+        let mut missing = group.clone();
+        missing.close_members.push("missing".into());
+        assert!(
+            ShellMutation::Workspace(&missing, WorkspaceAction::Close(&group_panes))
+                .request(&snapshot)
+                .is_err()
+        );
+        // New members or a second parent invalidate the close consent even
+        // when the captured panes still exist.
+        let mut extra = snapshot.workspaces[1].clone();
+        extra.workspace_id = "w3".into();
+        snapshot.workspaces.push(extra);
+        assert!(
+            ShellMutation::Workspace(&group, WorkspaceAction::Close(&group_panes))
+                .request(&snapshot)
+                .is_err()
+        );
+        snapshot.workspaces.pop();
+        snapshot.workspaces[1]
+            .worktree
+            .as_mut()
+            .unwrap()
+            .is_linked_worktree = false;
+        assert!(
+            ShellMutation::Workspace(&group, WorkspaceAction::Close(&group_panes))
+                .request(&snapshot)
+                .is_err()
+        );
+        assert_eq!(
+            workspace_close_members(&snapshot.workspaces, &group.workspace),
+            vec!["w1"]
+        );
+        snapshot.boot_id = "restarted".into();
+        assert!(
+            ShellMutation::Workspace(&target, WorkspaceAction::NewTab)
+                .request(&snapshot)
+                .is_err()
+        );
+        snapshot.boot_id = target.boot_id.clone();
+        snapshot.workspaces.clear();
+        assert!(
+            ShellMutation::Workspace(&target, WorkspaceAction::Rename("new"))
+                .request(&snapshot)
+                .is_err()
+        );
+    }
+
+    #[test]
     fn mutations_reject_snapshots_changed_while_draining_events() {
         for (mutation, method) in [
             (ShellMutation::CreateTab, Method::TabCreate),
@@ -1387,6 +1900,124 @@ mod tests {
     }
 
     #[test]
+    fn composition_survives_metadata_refresh_and_waits_for_its_surface() {
+        let mut owner = ready();
+        let input = owner.projected_token().unwrap();
+        let composition = owner.composition_identity(&input);
+        for revision in 1..=4 {
+            let mut next = (**owner.snapshot.as_ref().unwrap()).clone();
+            next.revision += 1;
+            next.workspaces[0].label = format!("Renamed {revision}");
+            next.tabs[0].label = format!("Task {revision}");
+            next.agents[0].state_change_seq += 1;
+            next.agents[0].title = Some(format!("Working {revision}"));
+            owner.accept(
+                ClientEvent::Snapshot(Arc::new(next.clone())),
+                Instant::now(),
+            );
+            assert!(owner.composition_destination_matches(&composition));
+            assert!(owner.projected_composition_input(&composition).is_none());
+            owner.accept(
+                ClientEvent::Surface(surface(&next, revision + 1)),
+                Instant::now(),
+            );
+            let current = owner.projected_composition_input(&composition).unwrap();
+            assert_ne!(
+                current, input,
+                "ordinary input keeps its exact projection fence"
+            );
+            assert_eq!(current.target, input.target);
+            assert_eq!(current.projection_revision, next.revision);
+        }
+    }
+
+    #[test]
+    fn composition_never_survives_destination_round_trips_or_disconnects() {
+        let mut owner = ready();
+        let composition = owner.composition_identity(&owner.projected_token().unwrap());
+        let original = owner.snapshot.clone().unwrap();
+        let mut next = (*original).clone();
+        next.revision += 1;
+        next.focused_pane_id = Some("w1:p2".into());
+        owner.accept(
+            ClientEvent::Snapshot(Arc::new(next.clone())),
+            Instant::now(),
+        );
+        assert!(!owner.composition_destination_matches(&composition));
+        next.revision += 1;
+        next.focused_pane_id = original.focused_pane_id.clone();
+        owner.accept(
+            ClientEvent::Snapshot(Arc::new(next.clone())),
+            Instant::now(),
+        );
+        owner.accept(ClientEvent::Surface(surface(&next, 3)), Instant::now());
+        assert!(owner.projected_token().is_some());
+        assert!(owner.projected_composition_input(&composition).is_none());
+
+        for transition in 0..4 {
+            let mut owner = ready();
+            let composition = owner.composition_identity(&owner.projected_token().unwrap());
+            match transition {
+                0 => {
+                    owner.set_focus(false).unwrap();
+                    owner.set_focus(true).unwrap();
+                }
+                1 => owner.resize(owner.geometry.surface_size, (9, 18)).unwrap(),
+                2 => owner.disconnect(),
+                _ => fence(&mut owner, None),
+            }
+            assert!(!owner.composition_destination_matches(&composition));
+            assert!(owner.projected_composition_input(&composition).is_none());
+        }
+    }
+
+    #[test]
+    fn popup_composition_survives_metadata_but_not_popup_replacement() {
+        let mut owner = ready();
+        let mut popup_surface = (**owner.surface.as_ref().unwrap()).clone();
+        popup_surface.surface_revision = 2;
+        popup_surface.popup = Some(Box::new(ClientShellPopupSurface {
+            terminal_id: "popup-1".into(),
+            title: String::new(),
+            width: None,
+            height: None,
+            frame: popup_surface.frame.clone(),
+            mouse_reporting: false,
+            sgr_pixel_mouse: false,
+            pixel_width: 640,
+            pixel_height: 384,
+        }));
+        owner.accept(
+            ClientEvent::Surface(Arc::new(popup_surface.clone())),
+            Instant::now(),
+        );
+        let composition = owner.composition_identity(&owner.projected_token().unwrap());
+        let mut next = (**owner.snapshot.as_ref().unwrap()).clone();
+        next.revision += 1;
+        owner.accept(
+            ClientEvent::Snapshot(Arc::new(next.clone())),
+            Instant::now(),
+        );
+        assert!(owner.composition_destination_matches(&composition));
+        popup_surface.projection_revision = next.revision;
+        popup_surface.surface_revision += 1;
+        owner.accept(
+            ClientEvent::Surface(Arc::new(popup_surface.clone())),
+            Instant::now(),
+        );
+        assert!(owner.projected_composition_input(&composition).is_some());
+        popup_surface.popup.as_mut().unwrap().terminal_id = "popup-2".into();
+        popup_surface.surface_revision += 1;
+        owner.accept(
+            ClientEvent::Surface(Arc::new(popup_surface)),
+            Instant::now(),
+        );
+        assert!(!owner.composition_destination_matches(&composition));
+        owner.accept(ClientEvent::Surface(surface(&next, 5)), Instant::now());
+        assert!(owner.projected_composition_input(&composition).is_none());
+    }
+
+    #[test]
     fn new_projection_and_popup_round_trip_invalidate_captured_input() {
         let mut owner = ready();
         let old = owner.projected_token().unwrap();
@@ -1540,6 +2171,80 @@ mod tests {
         }
         assert_eq!(owner.next_retry, Some(now + MAX_BACKOFF));
         assert_eq!(owner.backoff, MAX_BACKOFF);
+    }
+
+    #[test]
+    fn worktree_dialog_responses_are_correlated_and_never_replayed() {
+        let mut owner = ready();
+        owner.dialog = Some(DialogRequest {
+            id: "list-1".into(),
+            method: Method::WorktreeList,
+            response: None,
+        });
+        owner.accept(
+            ClientEvent::Response {
+                request_id: "list-1".into(),
+                response: json!({"id": "list-1", "result": {"type": "worktree_list"}}),
+            },
+            Instant::now(),
+        );
+        assert!(owner.take_worktree_response("another").is_none());
+        assert_eq!(
+            owner.take_worktree_response("list-1").unwrap().unwrap()["result"]["type"],
+            "worktree_list"
+        );
+        assert!(owner.dialog.is_none());
+
+        owner.dialog = Some(DialogRequest {
+            id: "remove-1".into(),
+            method: Method::WorktreeRemove,
+            response: None,
+        });
+        owner.disconnect();
+        let error = owner
+            .take_worktree_response("remove-1")
+            .unwrap()
+            .unwrap_err();
+        assert!(error.contains("not replayed"));
+        assert!(owner.dialog.is_none());
+    }
+
+    #[test]
+    fn pending_worktree_mutation_holds_focus_and_names_its_failure() {
+        let mut owner = ready();
+        owner.dialog = Some(DialogRequest {
+            id: "create-1".into(),
+            method: Method::WorktreeCreate,
+            response: None,
+        });
+        assert!(owner.dialog.as_ref().unwrap().mutating());
+        assert!(
+            !DialogRequest {
+                id: "list-1".into(),
+                method: Method::WorktreeList,
+                response: None,
+            }
+            .mutating()
+        );
+        owner.accept(
+            ClientEvent::Response {
+                request_id: "create-1".into(),
+                response: json!({"id": "create-1", "result": {
+                    "type": "worktree_created",
+                    "workspace": {"workspace_id": "w2"},
+                }}),
+            },
+            Instant::now(),
+        );
+        let error = owner
+            .take_worktree_response("create-1")
+            .unwrap()
+            .unwrap_err();
+        assert!(
+            error.contains("could not be focused"),
+            "a created checkout must not be reported as selected"
+        );
+        assert!(owner.dialog.is_none());
     }
 
     #[test]

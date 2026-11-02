@@ -12,7 +12,7 @@ func fail(_ message: String) -> Never {
 
 let arguments = CommandLine.arguments
 if arguments.count < 3 {
-    fail("Usage: drive-window <pid> doctor|windows|ocr|ocr-boxes|pixel|sample|pixel-range|type|paste|paste-run|key|click|hover|drag|resize|position|activate|active|english [arguments]")
+    fail("Usage: drive-window <pid> doctor|windows|ocr|ocr-boxes|pixel|sample|pixel-range|type|paste|paste-run|key|ime-key|input-sources|input-source|click|hover|drag|resize|position|activate|active|english [arguments]")
 }
 guard let pid = Int32(arguments[1]) else { fail("Invalid application PID") }
 let command = arguments[2]
@@ -321,6 +321,45 @@ do {
         try activateTarget()
         try selectEnglish()
         print("Selected ABC input source")
+    case "input-sources":
+        let query = [kTISPropertyInputSourceIsEnabled as String: true] as CFDictionary
+        let sources = TISCreateInputSourceList(query, false).takeRetainedValue() as! [TISInputSource]
+        for source in sources {
+            if let property = TISGetInputSourceProperty(source, kTISPropertyInputSourceID) {
+                print(Unmanaged<CFString>.fromOpaque(property).takeUnretainedValue() as String)
+            }
+        }
+    case "input-source":
+        guard arguments.count == 4 else { fail("input-source requires an enabled source ID") }
+        guard NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else {
+            fail("Target lost focus; input source not changed")
+        }
+        let query = [kTISPropertyInputSourceID as String: arguments[3],
+                     kTISPropertyInputSourceIsEnabled as String: true] as CFDictionary
+        let sources = TISCreateInputSourceList(query, false).takeRetainedValue() as! [TISInputSource]
+        guard let source = sources.first, TISSelectInputSource(source) == noErr else {
+            fail("Requested input source is not enabled")
+        }
+        print("Selected \(arguments[3])")
+    case "ime-key":
+        guard arguments.count == 4, let keyCode = UInt16(arguments[3]) else {
+            fail("ime-key requires a macOS virtual key code")
+        }
+        // Preserve the live IME session: activating or selecting ABC here would
+        // cancel marked text before the test can exercise it.
+        guard NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else {
+            fail("Target lost focus; no IME key sent")
+        }
+        for down in [true, false] {
+            guard let event = CGEvent(keyboardEventSource: CGEventSource(stateID: .hidSystemState),
+                                      virtualKey: keyCode, keyDown: down) else {
+                fail("Cannot create IME key event")
+            }
+            event.flags = []
+            event.post(tap: .cghidEventTap)
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        Thread.sleep(forTimeInterval: 0.15)
     case "windows":
         let entries = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
         let windows = entries.filter { ($0[kCGWindowOwnerPID as String] as? Int32) == pid }
