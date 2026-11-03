@@ -61,6 +61,7 @@ impl HerdrWindow {
         self.workspace_menu.is_none()
             && self.sidebar_menu.is_none()
             && self.tab_menu.is_none()
+            && self.pane_edit.is_none()
             && !self.link_menu_open()
             && self.composition.is_empty()
             && self
@@ -79,6 +80,7 @@ impl HerdrWindow {
         if !self.actions_available(cx) {
             return;
         }
+        self.split_drag = None;
         self.cancel_links();
         let result = self.connection.update(cx, |connection, cx| {
             let result = action(connection);

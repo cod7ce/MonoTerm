@@ -29,6 +29,8 @@ mod chrome;
 mod indicators;
 #[path = "herdr_links.rs"]
 mod links;
+#[path = "herdr_pane_controls.rs"]
+mod pane_controls;
 #[path = "herdr_sidebar.rs"]
 mod sidebar;
 #[path = "herdr_sidebar_menu.rs"]
@@ -72,6 +74,8 @@ pub(crate) struct HerdrWindow {
     sidebar_drag: Option<SidebarDrag>,
     workspace_menu: Option<workspace_menu::WorkspaceMenu>,
     tab_menu: Option<tab_menu::TabMenu>,
+    pane_edit: Option<pane_controls::PaneEdit>,
+    split_drag: Option<pane_controls::SplitDrag>,
     shell_corners: shell_surface::CornerCache,
     sidebar_scroll: [gpui::ScrollHandle; 2],
     collapsed_repos: std::collections::HashSet<String>,
@@ -116,6 +120,9 @@ impl HerdrWindow {
         cx: &mut Context<Self>,
     ) -> Self {
         let observation = cx.observe(&connection, |view, _, cx| {
+            if !view.connection.read(cx).connected() {
+                view.split_drag = None;
+            }
             view.validate_links(cx);
             if view
                 .composition_token
@@ -138,6 +145,7 @@ impl HerdrWindow {
         });
         let activation = cx.observe_window_activation(window, |view, window, cx| {
             if !window.is_window_active() {
+                view.split_drag = None;
                 view.cancel_links();
                 if view.sidebar_drag.take().is_some() {
                     view.save_layout(cx);
@@ -192,6 +200,8 @@ impl HerdrWindow {
             sidebar_drag: None,
             workspace_menu: None,
             tab_menu: None,
+            pane_edit: None,
+            split_drag: None,
             shell_corners: shell_surface::CornerCache::default(),
             sidebar_scroll: std::array::from_fn(|_| gpui::ScrollHandle::new()),
             collapsed_repos: preferences.collapsed_repos,
@@ -374,7 +384,11 @@ impl HerdrWindow {
     }
 
     fn key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        if self.workspace_menu.is_some() || self.sidebar_menu.is_some() || self.tab_menu.is_some() {
+        if self.workspace_menu.is_some()
+            || self.sidebar_menu.is_some()
+            || self.tab_menu.is_some()
+            || self.pane_edit.is_some()
+        {
             return;
         }
         let key = &event.keystroke;
@@ -428,6 +442,9 @@ impl HerdrWindow {
         window: &Window,
         cx: &mut Context<Self>,
     ) {
+        if self.pane_edit.is_some() || self.split_drag.is_some() {
+            return;
+        }
         if self.link_mouse(position, kind, modifiers, window, cx) {
             return;
         }
@@ -621,6 +638,7 @@ impl HerdrWindow {
             || self.sidebar_menu.is_some()
             || self.workspace_menu.is_some()
             || self.tab_menu.is_some()
+            || self.pane_edit.is_some()
         {
             return;
         }
@@ -662,6 +680,7 @@ impl HerdrWindow {
             || self.sidebar_menu.is_some()
             || self.workspace_menu.is_some()
             || self.tab_menu.is_some()
+            || self.pane_edit.is_some()
         {
             return;
         }
@@ -704,6 +723,9 @@ impl HerdrWindow {
         let on_move = window.listener_for(
             &cx.entity(),
             |view, event: &gpui::MouseMoveEvent, window, cx| {
+                if view.split_mouse_move(event, cx) {
+                    return;
+                }
                 view.link_move(event, window, cx);
                 if let Some(drag) = view.sidebar_drag {
                     if event.pressed_button != Some(MouseButton::Left) {
@@ -765,6 +787,9 @@ impl HerdrWindow {
         let on_up = window.listener_for(
             &cx.entity(),
             |view, event: &gpui::MouseUpEvent, window, cx| {
+                if view.split_mouse_up(event, cx) {
+                    return;
+                }
                 if view.sidebar_drag.take().is_some() {
                     view.save_layout(cx);
                     cx.stop_propagation();
@@ -969,6 +994,12 @@ impl Render for HerdrWindow {
             self.apply_material(window, cx);
         }
         self.update_workspace_dialog(window, cx);
+        self.poll_pane_controls(window, cx);
+        if let Some(edit) = &self.pane_edit {
+            edit.editor.update(cx, |editor, cx| {
+                editor.set_style(self.palette.herdr_sidebar(), self.language, cx)
+            });
+        }
         let reduced_motion = crate::window_style::reduced_motion();
         self.indicator_elapsed = if reduced_motion {
             0
@@ -1044,6 +1075,7 @@ impl Render for HerdrWindow {
         let tab_menu = self.render_tab_menu(window, cx);
         let link_menu = self.render_link_menu(window, cx);
         let link_tooltip = self.link_tooltip();
+        let split_cursor = self.split_cursor(window.mouse_position(), cx);
         let background = shell_surface::background(
             &mut self.shell_corners,
             p,
@@ -1076,8 +1108,10 @@ impl Render for HerdrWindow {
             ))
             .on_key_down(cx.listener(Self::key_down))
             .on_action(cx.listener(|view, _: &ui::FocusControls, window, cx| {
-                view.focus_handle.focus(window, cx);
-                window.focus_next(cx);
+                if view.actions_available(cx) {
+                    view.focus_handle.focus(window, cx);
+                    window.focus_next(cx);
+                }
                 cx.stop_propagation();
             }))
             .on_action(
@@ -1138,6 +1172,9 @@ impl Render for HerdrWindow {
             .on_action(cx.listener(|view, _: &crate::CustomizeTab, window, cx| {
                 view.rename_focused_tab(window, cx)
             }))
+            .on_action(cx.listener(|view, _: &crate::RenamePane, window, cx| {
+                view.rename_focused_pane(window, cx)
+            }))
             .on_action(cx.listener(
                 |view, _: &gpui_ghostty_terminal::view::SelectAll, window, cx| {
                     view.select_all(window, cx);
@@ -1184,6 +1221,7 @@ impl Render for HerdrWindow {
                         div()
                             .id("herdr-terminal")
                             .when(link_tooltip.is_some(), |terminal| terminal.cursor_pointer())
+                            .when_some(split_cursor, |terminal, cursor| terminal.cursor(cursor))
                             .flex_1()
                             .min_h_0()
                             .min_w_0()
@@ -1197,6 +1235,9 @@ impl Render for HerdrWindow {
                                 |view, event: &gpui::MouseDownEvent, window, cx| {
                                     view.focus_handle.focus(window, cx);
                                     if event.first_mouse {
+                                        return;
+                                    }
+                                    if view.pane_mouse_down(event, window, cx) {
                                         return;
                                     }
                                     if let Some(button) = mouse_button(event.button) {
@@ -1213,6 +1254,7 @@ impl Render for HerdrWindow {
                             ))
                             .on_mouse_move(cx.listener(
                                 |view, event: &gpui::MouseMoveEvent, window, cx| {
+                                    cx.notify();
                                     let kind = event
                                         .pressed_button
                                         .and_then(mouse_button)
@@ -1289,6 +1331,7 @@ impl Render for HerdrWindow {
             .children(workspace_menu)
             .children(sidebar_menu)
             .children(tab_menu)
+            .children(self.pane_edit.as_ref().map(|edit| edit.editor.clone()))
             .children(link_menu)
             .children(link_tooltip)
     }

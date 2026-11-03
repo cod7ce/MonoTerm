@@ -25,6 +25,10 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[path = "herdr_panes.rs"]
+mod panes;
+pub use panes::{PaneTarget, SplitTarget};
+
 const EVENTS_PER_POLL: usize = 32;
 const INITIAL_BACKOFF: Duration = Duration::from_millis(250);
 const MAX_BACKOFF: Duration = Duration::from_secs(8);
@@ -191,6 +195,7 @@ enum ShellMutation<'a> {
     CreateTab,
     CloseTab(&'a str),
     RenameTab(&'a TabTarget, &'a str),
+    RenamePane(&'a PaneTarget, &'a str),
     SplitPane(&'a str, &'a str),
     ZoomPane(&'a str, bool),
     ClosePane(&'a str),
@@ -287,6 +292,14 @@ impl ShellMutation<'_> {
                 Ok((
                     Method::TabRename,
                     json!({"tab_id": target.tab.tab_id, "label": label}),
+                ))
+            }
+            Self::RenamePane(target, label) => {
+                target.validate(snapshot)?;
+                let label = label.trim();
+                Ok((
+                    Method::PaneRename,
+                    json!({"pane_id": target.pane.pane_id, "label": label}),
                 ))
             }
             Self::ZoomPane(id, zoomed) => {
@@ -832,6 +845,46 @@ impl HerdrConnection {
         self.mutate_shell(ShellMutation::RenameTab(target, label))
     }
 
+    pub fn rename_pane(&mut self, target: &PaneTarget, label: &str) -> Result<String, String> {
+        let snapshot = self.snapshot.clone().ok_or("Herdr has no snapshot")?;
+        let (method, params) = ShellMutation::RenamePane(target, label).request(&snapshot)?;
+        self.queue_dialog(&snapshot, method, params, true, None)
+    }
+
+    /// A drag sends at most one request at a time and only against the same
+    /// visible pane tree. A failed request is returned to its owner, never replayed.
+    pub fn set_split_ratio(&mut self, target: &SplitTarget, ratio: f32) -> Result<String, String> {
+        if !ratio.is_finite() || !(0.1..=0.9).contains(&ratio) {
+            return Err("Herdr split ratio is out of range".into());
+        }
+        let (snapshot, surface) = self
+            .current_projection()
+            .ok_or("Herdr surface is not ready")?;
+        target.validate(snapshot, surface)?;
+        let snapshot = self.snapshot.clone().ok_or("Herdr has no snapshot")?;
+        // queue_dialog drains events and validates the split again immediately
+        // before sending: another client may have reused its path meanwhile.
+        self.queue_dialog(
+            &snapshot,
+            Method::LayoutSetSplitRatio,
+            json!({"tab_id": target.tab_id, "path": target.split.path, "ratio": ratio}),
+            true,
+            Some(target),
+        )
+    }
+
+    pub fn split_target(&self, col: u16, row: u16) -> Option<SplitTarget> {
+        if !self.connected() {
+            return None;
+        }
+        let (snapshot, surface) = self.current_projection()?;
+        let split = surface
+            .splits
+            .iter()
+            .find(|split| crate::herdr_render::contains(split.hit_rect, col, row))?;
+        SplitTarget::capture(snapshot, surface, split)
+    }
+
     pub fn split_pane(&mut self, pane_id: &str, direction: &str) -> Result<(), String> {
         self.mutate_shell(ShellMutation::SplitPane(pane_id, direction))
     }
@@ -883,9 +936,33 @@ impl HerdrConnection {
         }
         let snapshot = self.snapshot.clone().ok_or("Herdr has no snapshot")?;
         target.validate(&snapshot)?;
+        self.queue_dialog(&snapshot, method, params, false, None)
+    }
+
+    fn queue_dialog(
+        &mut self,
+        snapshot: &ClientShellSnapshot,
+        method: Method,
+        params: Value,
+        require_surface: bool,
+        split: Option<&SplitTarget>,
+    ) -> Result<String, String> {
         let epoch = self.epoch;
         self.poll();
-        self.validate_mutation_snapshot(&snapshot, epoch)?;
+        self.validate_mutation_snapshot(snapshot, epoch)?;
+        if require_surface
+            && self
+                .current_projection()
+                .is_none_or(|(_, surface)| surface.popup.is_some())
+        {
+            return Err("Herdr surface is not ready".into());
+        }
+        if let Some(target) = split {
+            target.validate(
+                snapshot,
+                self.surface.as_ref().ok_or("Herdr surface is not ready")?,
+            )?;
+        }
         if !self.connected()
             || !self.events_drained()
             || self.fence.is_some()
@@ -918,6 +995,10 @@ impl HerdrConnection {
     }
 
     pub fn take_worktree_response(&mut self, id: &str) -> Option<Result<Value, String>> {
+        self.take_dialog_response(id)
+    }
+
+    pub fn take_dialog_response(&mut self, id: &str) -> Option<Result<Value, String>> {
         let request = self.dialog.as_mut().filter(|request| request.id == id)?;
         let response = request.response.take()?;
         self.dialog = None;
@@ -1000,6 +1081,7 @@ impl HerdrConnection {
             ShellMutation::CreateTab => "Creating tab",
             ShellMutation::CloseTab(_) => "Closing tab",
             ShellMutation::RenameTab(..) => "Renaming tab",
+            ShellMutation::RenamePane(..) => "Renaming pane",
             ShellMutation::SplitPane(..) => "Splitting pane",
             ShellMutation::ZoomPane(_, true) => "Maximizing pane",
             ShellMutation::ZoomPane(_, false) => "Restoring pane",
@@ -1727,6 +1809,81 @@ mod tests {
             (Method::WorkspaceCreate, json!({"focus": true}))
         );
         assert!(ShellMutation::CreateTab.request(&snapshot).is_err());
+    }
+
+    #[test]
+    fn pane_rename_targets_the_clicked_pane_and_supports_restoring_its_name() {
+        let mut snapshot = (*snapshot()).clone();
+        let mut pane = snapshot.panes[0].clone();
+        pane.pane_id = "w1:p2".into();
+        pane.focused = false;
+        snapshot.panes.push(pane.clone());
+        let target = PaneTarget::new(&snapshot, &pane);
+        assert_eq!(
+            ShellMutation::RenamePane(&target, "  中文 pane  ")
+                .request(&snapshot)
+                .unwrap(),
+            (
+                Method::PaneRename,
+                json!({"pane_id": "w1:p2", "label": "中文 pane"})
+            )
+        );
+        assert_eq!(snapshot.focused_pane_id.as_deref(), Some("w1:p1"));
+        assert_eq!(
+            ShellMutation::RenamePane(&target, " \u{3000} ")
+                .request(&snapshot)
+                .unwrap(),
+            (Method::PaneRename, json!({"pane_id": "w1:p2", "label": ""}))
+        );
+        for change in 0..5 {
+            let mut changed = snapshot.clone();
+            match change {
+                0 => changed.boot_id = "another-boot".into(),
+                1 => changed.panes.retain(|p| p.pane_id != pane.pane_id),
+                2 => changed.panes[1].tab_id = "w1:t9".into(),
+                3 => changed.workspaces.clear(),
+                _ => changed.tabs.clear(),
+            }
+            assert!(
+                ShellMutation::RenamePane(&target, "new")
+                    .request(&changed)
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn pane_dialogs_correlate_errors_and_disconnect_without_replay() {
+        for method in [Method::PaneRename, Method::LayoutSetSplitRatio] {
+            let mut owner = ready();
+            owner.dialog = Some(DialogRequest {
+                id: "pane-request".into(),
+                method,
+                response: None,
+            });
+            assert!(!owner.accept_dialog_response(
+                "other-request",
+                &json!({"id": "other-request", "result": {}})
+            ));
+            assert!(owner.take_dialog_response("pane-request").is_none());
+            assert!(owner.accept_dialog_response(
+                "pane-request",
+                &json!({"id": "pane-request", "error": {"message": "stale target"}})
+            ));
+            assert_eq!(
+                owner.take_dialog_response("pane-request").unwrap().unwrap()["error"]["message"],
+                "stale target"
+            );
+            assert!(owner.dialog.is_none());
+            owner.dialog = Some(DialogRequest {
+                id: "next-request".into(),
+                method,
+                response: None,
+            });
+            owner.failed("Disconnected".into(), Instant::now());
+            assert!(owner.take_dialog_response("next-request").unwrap().is_err());
+            assert!(owner.dialog.is_none());
+        }
     }
 
     #[test]

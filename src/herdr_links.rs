@@ -136,7 +136,12 @@ impl HerdrWindow {
         window: &Window,
         cx: &mut Context<Self>,
     ) {
-        let next = if command_link(modifiers) && self.links.menu.is_none() && !self.selecting {
+        let next = if command_link(modifiers)
+            && self.links.menu.is_none()
+            && !self.selecting
+            && self.pane_edit.is_none()
+            && self.split_drag.is_none()
+        {
             self.link_target(position, window, cx)
         } else {
             None

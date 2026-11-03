@@ -8,6 +8,7 @@ mod herdr_view;
 mod herdr_worktree;
 mod layout;
 mod locale;
+mod pane_editor;
 mod process_monitor;
 mod pty;
 mod session;
@@ -56,6 +57,7 @@ actions!(
         ToggleSidebar,
         ToggleSettings,
         CustomizeTab,
+        RenamePane,
         DismissTabMenu,
         SplitRight,
         SplitDown,
@@ -103,6 +105,8 @@ struct TerminalApp {
     tab_menu_items: [gpui::FocusHandle; 3],
     tab_editor: Option<gpui::Entity<tab_editor::TabEditor>>,
     tab_editor_subscription: Option<Subscription>,
+    pane_editor: Option<(usize, gpui::Entity<pane_editor::PaneEditor>)>,
+    pane_editor_subscription: Option<Subscription>,
     zen: bool,
     appearance: Appearance,
     palette: Palette,
@@ -226,6 +230,8 @@ impl TerminalApp {
             tab_menu_items: std::array::from_fn(|_| cx.focus_handle().tab_index(0).tab_stop(true)),
             tab_editor: None,
             tab_editor_subscription: None,
+            pane_editor: None,
+            pane_editor_subscription: None,
             zen: false,
             appearance,
             palette,
@@ -296,6 +302,8 @@ impl TerminalApp {
         self.tab_menu = None;
         self.tab_editor = None;
         self.tab_editor_subscription = None;
+        self.pane_editor = None;
+        self.pane_editor_subscription = None;
         self.resizing_sidebar = false;
         self.dragging = None;
         self.split_bounds.clear();
@@ -352,8 +360,12 @@ impl TerminalApp {
         self.sessions.iter().find(|s| s.id == id)
     }
 
+    fn tab_overlay_open(&self) -> bool {
+        self.tab_menu.is_some() || self.tab_editor.is_some() || self.pane_editor.is_some()
+    }
+
     fn prepare_terminal_action(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.tab_menu.is_some() || self.tab_editor.is_some() {
+        if self.tab_overlay_open() {
             return false;
         }
         if let Some(view) = self
@@ -432,7 +444,7 @@ impl TerminalApp {
         self.split_bounds.clear();
         if let Some(session) = self.active_session() {
             let directory = session.directory.clone();
-            if self.tab_editor.is_none() && self.tab_menu.is_none() {
+            if !self.tab_overlay_open() {
                 session.focus(window, cx);
             }
             self.directory = directory;
@@ -986,6 +998,8 @@ impl TerminalApp {
         self.tab_menu = None;
         self.tab_editor = None;
         self.tab_editor_subscription = None;
+        self.pane_editor = None;
+        self.pane_editor_subscription = None;
         if let Some(session) = self.active_session() {
             session.focus(window, cx);
         } else {
@@ -1000,6 +1014,10 @@ impl TerminalApp {
         };
         let appearance = tab.appearance.clone();
         let default_title = self.default_tab_label(tab);
+        self.pane_editor = None;
+        self.pane_editor_subscription = None;
+        self.dragging = None;
+        self.resizing_sidebar = false;
         let editor = cx.new(|cx| {
             tab_editor::TabEditor::new(
                 tab_id,
@@ -1026,6 +1044,47 @@ impl TerminalApp {
         editor.update(cx, |editor, cx| editor.focus(window, cx));
         self.tab_editor = Some(editor);
         self.tab_menu = None;
+        cx.notify();
+    }
+
+    fn edit_pane(&mut self, pane_id: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.prepare_terminal_action(cx) {
+            return;
+        }
+        let Some(tab) = self.tabs.iter().find(|tab| tab.layout.contains(pane_id)) else {
+            return;
+        };
+        let title = tab.pane_title(pane_id).map(str::to_owned);
+        let default_title = self.language.dynamic_text(&format!("Pane {pane_id}"));
+        let editor = cx.new(|cx| {
+            pane_editor::PaneEditor::new(
+                title,
+                default_title,
+                self.palette,
+                self.language,
+                window,
+                cx,
+            )
+        });
+        self.dragging = None;
+        self.resizing_sidebar = false;
+        self.pane_editor_subscription =
+            Some(
+                cx.subscribe_in(&editor, window, move |root, _, event, window, cx| {
+                    if let pane_editor::EditorEvent::Save(title) = event
+                        && let Some(tab) = root
+                            .tabs
+                            .iter_mut()
+                            .find(|tab| tab.layout.contains(pane_id))
+                    {
+                        tab.rename_pane(pane_id, title.as_deref().unwrap_or_default());
+                        root.follow_controller.mark_used(tab.id);
+                    }
+                    root.dismiss_tab_overlay(window, cx);
+                }),
+            );
+        editor.update(cx, |editor, cx| editor.focus(window, cx));
+        self.pane_editor = Some((pane_id, editor));
         cx.notify();
     }
 
@@ -1253,6 +1312,10 @@ impl TerminalApp {
             return div().into_any_element();
         };
         let active = self.tabs[self.active].active_pane == id;
+        let custom_title = self.tabs[self.active].pane_title(id);
+        let pane_title = custom_title
+            .map(str::to_owned)
+            .unwrap_or_else(|| self.language.dynamic_text(&format!("Pane {id}")));
         let root = cx.entity().downgrade();
         let p = self.palette;
         if let Some(view) = &session.view {
@@ -1305,7 +1368,7 @@ impl TerminalApp {
             .flex()
             .flex_col()
             .overflow_hidden()
-            .when(multiple && !self.zen, |e| {
+            .when((multiple || custom_title.is_some()) && !self.zen, |e| {
                 e.child(
                     div()
                         .h(px(26.0))
@@ -1322,10 +1385,31 @@ impl TerminalApp {
                         })
                         .on_mouse_down(
                             MouseButton::Left,
-                            cx.listener(move |root, _, window, cx| root.focus_pane(id, window, cx)),
+                            cx.listener(move |root, event: &gpui::MouseDownEvent, window, cx| {
+                                root.focus_pane(id, window, cx);
+                                if event.click_count == 2 {
+                                    root.edit_pane(id, window, cx);
+                                }
+                                cx.stop_propagation();
+                            }),
+                        )
+                        .on_mouse_down(
+                            MouseButton::Right,
+                            cx.listener(move |root, _, window, cx| {
+                                root.focus_pane(id, window, cx);
+                                root.edit_pane(id, window, cx);
+                                cx.stop_propagation();
+                            }),
                         )
                         .child(dot(session.running))
-                        .child(self.label(format!("Pane {id}")))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(px(11.0))
+                                .text_color(rgb(p.muted))
+                                .child(pane_title),
+                        )
                         .child(div().flex_1())
                         .child(self.label(format!("{} × {}", session.grid.0, session.grid.1)))
                         .child(
@@ -1338,6 +1422,7 @@ impl TerminalApp {
                                 .cursor_pointer()
                                 .hover(move |style| style.bg(rgba(p.control_hover())))
                                 .active(move |style| style.bg(rgba(p.control_pressed())))
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                                 .on_click(cx.listener(move |root, _, window, cx| {
                                     cx.stop_propagation();
                                     root.close_pane(id, window, cx);
@@ -1359,6 +1444,54 @@ impl TerminalApp {
                     .child(content),
             )
             .into_any_element()
+    }
+
+    fn finish_resize_drag(&mut self, cx: &mut Context<Self>) {
+        let sidebar_changed = std::mem::take(&mut self.resizing_sidebar);
+        let pane_changed = self.dragging.take().is_some();
+        if sidebar_changed {
+            self.save_layout(cx);
+        } else if pane_changed {
+            cx.notify();
+        }
+    }
+
+    fn resize_drag_move(
+        &mut self,
+        event: &gpui::MouseMoveEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.resizing_sidebar && self.dragging.is_none() {
+            return;
+        }
+        if event.pressed_button != Some(MouseButton::Left) {
+            self.finish_resize_drag(cx);
+            return;
+        }
+        if self.resizing_sidebar {
+            let maximum = (f32::from(window.viewport_size().width) - 420.0).clamp(180.0, 480.0);
+            self.sidebar_width = (f32::from(event.position.x) + 2.0).clamp(180.0, maximum);
+            cx.notify();
+        } else if let Some((id, axis)) = self.dragging
+            && let Some(bounds) = self.split_bounds.get(&id)
+        {
+            let ratio = match axis {
+                Axis::Horizontal => {
+                    f32::from(event.position.x - bounds.origin.x) / f32::from(bounds.size.width)
+                }
+                Axis::Vertical => {
+                    f32::from(event.position.y - bounds.origin.y) / f32::from(bounds.size.height)
+                }
+            };
+            if let Some(tab) = self.tabs.get_mut(self.active)
+                && tab.layout.set_ratio(id, ratio)
+            {
+                cx.notify();
+            }
+        }
+        // A divider drag belongs to the layout, even when the pointer crosses a terminal.
+        cx.stop_propagation();
     }
 
     fn pane_tree(
@@ -1597,10 +1730,19 @@ impl Render for TerminalApp {
             .map(|editor| editor.read(cx).tab_id)
             .or_else(|| self.tab_menu.map(|(id, _)| id))
             .is_some_and(|id| !self.tabs.iter().any(|tab| tab.id == id));
-        if missing_overlay_target {
+        let missing_pane_target = self
+            .pane_editor
+            .as_ref()
+            .is_some_and(|(id, _)| !self.tabs.iter().any(|tab| tab.layout.contains(*id)));
+        if missing_overlay_target || missing_pane_target {
             self.dismiss_tab_overlay(window, cx);
         }
         if let Some(editor) = &self.tab_editor {
+            editor.update(cx, |editor, cx| {
+                editor.set_style(self.palette, self.language, cx)
+            });
+        }
+        if let Some((_, editor)) = &self.pane_editor {
             editor.update(cx, |editor, cx| {
                 editor.set_style(self.palette, self.language, cx)
             });
@@ -1652,7 +1794,7 @@ impl Render for TerminalApp {
             .tab_group()
             .tab_stop(false)
             .on_action(cx.listener(|root, _: &ui::FocusControls, window, cx| {
-                if root.tab_editor.is_none() && root.tab_menu.is_none() {
+                if !root.tab_overlay_open() {
                     root.root_focus.focus(window, cx);
                     window.focus_next(cx);
                 }
@@ -1661,8 +1803,7 @@ impl Render for TerminalApp {
             .on_key_down(cx.listener(|root, event: &gpui::KeyDownEvent, window, cx| {
                 if event.keystroke.key == "escape"
                     && !event.keystroke.modifiers.modified()
-                    && root.tab_editor.is_none()
-                    && root.tab_menu.is_none()
+                    && !root.tab_overlay_open()
                 {
                     if let Some(session) = root.active_session() {
                         session.focus(window, cx);
@@ -1759,6 +1900,11 @@ impl Render for TerminalApp {
                     root.edit_tab(tab.id, window, cx);
                 }
             }))
+            .on_action(cx.listener(|root, _: &RenamePane, window, cx| {
+                if let Some(tab) = root.tabs.get(root.active) {
+                    root.edit_pane(tab.active_pane, window, cx);
+                }
+            }))
             .on_action(cx.listener(|root, _: &DismissTabMenu, window, cx| {
                 root.dismiss_tab_overlay(window, cx);
             }))
@@ -1774,55 +1920,42 @@ impl Render for TerminalApp {
                     }
                 },
             ))
-            .on_mouse_move(
-                cx.listener(|root, event: &gpui::MouseMoveEvent, window, cx| {
-                    if root.resizing_sidebar {
-                        if event.pressed_button != Some(MouseButton::Left) {
-                            root.resizing_sidebar = false;
-                            root.save_layout(cx);
-                            return;
-                        }
-                        let maximum =
-                            (f32::from(window.viewport_size().width) - 420.0).clamp(180.0, 480.0);
-                        root.sidebar_width =
-                            (f32::from(event.position.x) + 2.0).clamp(180.0, maximum);
-                        cx.notify();
-                        return;
-                    }
-                    if let Some((id, axis)) = root.dragging {
-                        if event.pressed_button != Some(MouseButton::Left) {
-                            root.dragging = None;
-                            return;
-                        }
-                        if let Some(bounds) = root.split_bounds.get(&id) {
-                            let ratio = match axis {
-                                Axis::Horizontal => {
-                                    f32::from(event.position.x - bounds.origin.x)
-                                        / f32::from(bounds.size.width)
+            .child({
+                let root = cx.entity();
+                canvas(
+                    |_, _, _| {},
+                    move |_, _, window, _| {
+                        let on_move = window.listener_for(&root, Self::resize_drag_move);
+                        window.on_mouse_event(
+                            move |event: &gpui::MouseMoveEvent, phase, window, cx| {
+                                if phase == gpui::DispatchPhase::Capture {
+                                    on_move(event, window, cx);
                                 }
-                                Axis::Vertical => {
-                                    f32::from(event.position.y - bounds.origin.y)
-                                        / f32::from(bounds.size.height)
+                            },
+                        );
+                        let on_up = window.listener_for(
+                            &root,
+                            |root, event: &gpui::MouseUpEvent, _, cx| {
+                                if event.button == MouseButton::Left
+                                    && (root.resizing_sidebar || root.dragging.is_some())
+                                {
+                                    root.finish_resize_drag(cx);
+                                    cx.stop_propagation();
                                 }
-                            };
-                            if let Some(tab) = root.tabs.get_mut(root.active)
-                                && tab.layout.set_ratio(id, ratio)
-                            {
-                                cx.notify();
-                            }
-                        }
-                    }
-                }),
-            )
-            .capture_any_mouse_up(cx.listener(|root, _, _, cx| {
-                let sidebar_changed = std::mem::take(&mut root.resizing_sidebar);
-                if sidebar_changed {
-                    root.save_layout(cx);
-                }
-                if root.dragging.take().is_some() || sidebar_changed {
-                    cx.notify();
-                }
-            }))
+                            },
+                        );
+                        window.on_mouse_event(
+                            move |event: &gpui::MouseUpEvent, phase, window, cx| {
+                                if phase == gpui::DispatchPhase::Capture {
+                                    on_up(event, window, cx);
+                                }
+                            },
+                        );
+                    },
+                )
+                .absolute()
+                .size_full()
+            })
             .when(!self.zen, |e| {
                 e.child(div().h(px(SHELL_INSET)).flex_shrink_0())
                     .child(self.titlebar(show_sidebar, sidebar_width, cx))
@@ -1945,6 +2078,7 @@ impl Render for TerminalApp {
                 element.child(self.render_tab_menu(id, position, window, cx))
             })
             .children(self.tab_editor.clone())
+            .children(self.pane_editor.as_ref().map(|(_, editor)| editor.clone()))
             .child(toast::layer(&self.toast, p, cx).when(!self.zen, |layer| {
                 layer.left(px(shell_left)).right(px(SHELL_INSET))
             }))
@@ -1981,6 +2115,7 @@ fn set_menus(language: locale::Language, cx: &mut App) {
                 MenuItem::os_action(t("Select All"), SelectAll, OsAction::SelectAll),
                 MenuItem::separator(),
                 MenuItem::action(t("Customize tab…"), CustomizeTab),
+                MenuItem::action(t("Rename pane…"), RenamePane),
             ],
         },
         Menu {
@@ -2051,6 +2186,7 @@ fn main() {
             cx.on_action(|_: &Quit, cx| cx.quit());
             text_input::init(cx);
             tab_editor::init(cx);
+            pane_editor::init(cx);
             ui::init(cx);
             cx.bind_keys([
                 KeyBinding::new("cmd-shift-e", CustomizeTab, None),

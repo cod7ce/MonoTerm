@@ -359,6 +359,7 @@ pub fn block_terminal_actions(mut element: gpui::Stateful<gpui::Div>) -> gpui::S
         Box::new(crate::ToggleSidebar),
         Box::new(crate::ToggleSettings),
         Box::new(crate::CustomizeTab),
+        Box::new(crate::RenamePane),
         Box::new(crate::IncreaseFont),
         Box::new(crate::DecreaseFont),
         Box::new(crate::ResetFont),

@@ -2,7 +2,7 @@
 
 A native macOS terminal built with Rust, GPUI and Ghostty. Each local pane owns a real PTY; Ghostty handles terminal state and GPUI renders the terminal and application.
 
-**Current version: 0.3.1.** Apple Silicon, macOS 14 or later.
+**Current version: 0.3.2.** Apple Silicon, macOS 14 or later.
 
 ## Features
 
@@ -73,6 +73,8 @@ Cmd-Shift-Enter maximizes the active pane within its tab in either window; press
 
 The mouse wheel scrolls the pane under the pointer in either window; its magnitude follows the system gesture, including partial rows. In Herdr, wheel input goes to that daemon pane without moving keyboard focus, and the tab strip reveals the tab for the selected agent.
 
+Double-click or right-click a pane's title to rename that pane in either window. Edit → Rename pane also works when the title is hidden. Pane names are independent of tab names; leaving the field blank restores the automatic name. Local pane names last for the current session; Herdr names are stored by its daemon. Drag a divider to adjust split proportions in either window. Herdr coalesces motion while waiting for acknowledgements and stops the drag if its tab, pane tree, popup state or window geometry changes.
+
 Local limits are 12 tabs, 8 panes per tab and 48 panes total. Closing a pane terminates its shell; closing a tab terminates all its panes. Tabs and pane layouts are not restored after quitting. Preferences are stored under `~/Library/Application Support/MonoTerm/`; `MONOTERM_CONFIG_DIR` selects an isolated test directory.
 
 Font family and size are shared and saved automatically (Menlo, 14px by default; 10–28px). Settings → Terminal searches installed fonts, initially filters to monospace families, and previews English, CJK, code, Nerd symbols and emoji. Show all fonts includes proportional families, which still occupy terminal grid cells. Missing fonts temporarily use Menlo while retaining the chosen name. Install/uninstall font changes are detected after restarting MonoTerm. Settings itself keeps the system font.
@@ -91,7 +93,7 @@ Following respects manual tab selection, verified process identities, idle-shell
 
 The separate window groups linked worktrees under their repository, shows branch and ahead/behind counts, and offers independently scrollable Spaces and Agents sections. Use the sidebar chevron to show either section or both; right-click a Space for workspace and worktree actions. Removing a linked checkout requires confirmation, and a dirty checkout requires a separate force-removal confirmation. Closing a Space or group keeps its checkout files.
 
-The separate Herdr renderer currently does not display terminal graphics, support integrated SSH transport or drag daemon split dividers. This does not limit Kitty graphics in local MonoTerm PTYs. Adapted libraries and source provenance are documented in [vendor/herdr](vendor/herdr/README.md).
+The separate Herdr renderer currently does not display terminal graphics or support integrated SSH transport. This does not limit Kitty graphics in local MonoTerm PTYs. Adapted libraries and source provenance are documented in [vendor/herdr](vendor/herdr/README.md).
 
 ## Dependency pins
 
@@ -130,6 +132,8 @@ The 0.2.0 release passed 231 application/component tests (one opt-in ignored), s
 The 0.3.0 release passed 246 application/component tests (one opt-in ignored), strict all-target/all-feature Clippy, formatting, eight native updater scenarios, and Ed25519 signature tests. The component patch reproduces all 20 modified source files exactly. Focused native checks covered local shortcuts/preferences (37), Herdr shortcuts/layout (24), Herdr link actions (18), Space rename typing and Pinyin (14), and independent window lifecycles (27); key screenshots were inspected. Local links were also checked through an actual browser request. Full cross-version update installation and system-theme switching remain unverified.
 
 The 0.3.1 release passed 265 application/component tests (one opt-in ignored), strict all-target/all-feature Clippy, formatting, updater lifecycle fixtures, and a signed release build with Ed25519 verification. Focused changes cover Herdr tab styling and renaming, pane zoom in both windows, pointer-directed wheel routing, gesture-scaled scrolling, and revealing the selected agent's tab. Native GUI checks for these changes remain unverified because Accessibility and Screen Recording access were unavailable; cross-version update installation and notarization are not claimed.
+
+The 0.3.2 release passed 273 application/component tests (one opt-in ignored), strict all-target/all-feature Clippy, formatting, eight updater lifecycle scenarios, and Ed25519 signature tests. The signed release archive passed ZIP integrity, SHA256, appcast metadata, and extracted-bundle signature verification. This release adds independent pane names in both windows, Herdr split-divider dragging, and window-level local resize handling. Native pane editor and divider interactions remain unverified because Accessibility access was unavailable; full cross-version update installation and notarization are not claimed.
 
 Native GUI checks require a logged-in, unlocked macOS desktop and Accessibility/Screen Recording access. Use separate test-owned windows and configurations. Never restart an existing user terminal as part of verification. Existing upstream Rust future-compatibility warnings may still appear.
 

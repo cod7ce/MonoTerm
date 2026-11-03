@@ -231,13 +231,17 @@ pub struct TabAppearance {
     pub icon: Option<TabIcon>,
 }
 
+pub fn custom_title(title: &str) -> Option<String> {
+    let title: String = title.chars().filter(|c| !c.is_control()).collect();
+    let title = title.trim();
+    // A pasted title must not become an unbounded label or window title.
+    (!title.is_empty()).then(|| title.chars().take(120).collect())
+}
+
 impl TabAppearance {
     pub fn new(title: &str, icon: Option<TabIcon>) -> Self {
-        let title: String = title.chars().filter(|c| !c.is_control()).collect();
-        let title = title.trim();
         Self {
-            // A pasted title must not become an unbounded label or window title.
-            title: (!title.is_empty()).then(|| title.chars().take(120).collect()),
+            title: custom_title(title),
             icon,
         }
     }
@@ -252,6 +256,7 @@ pub struct Tab {
     /// Show only the active pane while retaining the full layout.
     pub zoomed: bool,
     pub appearance: TabAppearance,
+    pane_titles: std::collections::BTreeMap<usize, String>,
 }
 
 impl Tab {
@@ -262,7 +267,24 @@ impl Tab {
             active_pane: pane_id,
             zoomed: false,
             appearance: TabAppearance::default(),
+            pane_titles: Default::default(),
         }
+    }
+
+    pub fn pane_title(&self, pane_id: usize) -> Option<&str> {
+        self.pane_titles.get(&pane_id).map(String::as_str)
+    }
+
+    pub fn rename_pane(&mut self, pane_id: usize, title: &str) -> bool {
+        if !self.layout.contains(pane_id) {
+            return false;
+        }
+        if let Some(title) = custom_title(title) {
+            self.pane_titles.insert(pane_id, title);
+        } else {
+            self.pane_titles.remove(&pane_id);
+        }
+        true
     }
 
     pub fn pane_ids(&self) -> Vec<usize> {
@@ -302,12 +324,15 @@ impl Tab {
             self.active_pane
         };
         let layout = self.layout.remove(target)?;
+        let mut pane_titles = self.pane_titles;
+        pane_titles.remove(&target);
         Some(Self {
             id: self.id,
             zoomed: self.zoomed && self.active_pane != target && layout.pane_count() > 1,
             layout,
             active_pane,
             appearance: self.appearance,
+            pane_titles,
         })
     }
 
@@ -575,6 +600,70 @@ mod tests {
                 .count(),
             120
         );
+    }
+
+    #[test]
+    fn pane_names_are_independent_of_tab_appearance_and_each_other() {
+        let mut tab = Tab::new(7, 1);
+        tab.appearance = super::TabAppearance::new("Project", Some(super::TabIcon::Code));
+        let appearance = tab.appearance.clone();
+        assert!(tab.rename_pane(1, "  编辑器 🦀  "));
+        assert!(tab.split(2, 10, Horizontal));
+        assert!(tab.rename_pane(2, "Server"));
+        tab.cycle_focus(true);
+        assert_eq!(tab.pane_title(1), Some("编辑器 🦀"));
+        assert_eq!(tab.pane_title(2), Some("Server"));
+        assert_eq!(tab.appearance, appearance);
+        tab.appearance = Default::default();
+        assert_eq!(tab.pane_title(1), Some("编辑器 🦀"));
+    }
+
+    #[test]
+    fn pane_names_reset_and_disappear_with_only_their_target() {
+        let mut tab = Tab::new(7, 1);
+        assert!(tab.split(2, 10, Horizontal));
+        assert!(tab.rename_pane(1, "Editor"));
+        assert!(tab.rename_pane(2, "Server"));
+        let unchanged = tab.clone();
+        assert!(!tab.rename_pane(99, "Missing"));
+        assert_eq!(tab, unchanged);
+        assert_eq!(tab.clone().close(99), Some(unchanged));
+        assert!(tab.rename_pane(1, " \n\t "));
+        assert_eq!(tab.pane_title(1), None);
+        assert_eq!(tab.pane_title(2), Some("Server"));
+        assert!(tab.rename_pane(1, "Editor"));
+        let tab = tab.close(2).unwrap();
+        assert_eq!(tab.pane_title(1), Some("Editor"));
+        assert_eq!(tab.pane_title(2), None);
+        assert_eq!(Tab::new(8, 1).pane_title(1), None);
+    }
+
+    #[test]
+    fn pane_names_use_the_shared_title_limits() {
+        let mut tab = Tab::new(7, 1);
+        assert!(tab.rename_pane(1, "  开发\0e\u{301}\n  "));
+        assert_eq!(tab.pane_title(1), Some("开发e\u{301}"));
+        assert!(tab.rename_pane(1, &"界".repeat(200)));
+        assert_eq!(tab.pane_title(1).unwrap().chars().count(), 120);
+    }
+
+    #[test]
+    fn resizing_nested_panes_preserves_names_and_other_splits() {
+        let mut tab = Tab::new(7, 1);
+        assert!(tab.split(2, 10, Horizontal));
+        assert!(tab.split(3, 20, Vertical));
+        assert!(tab.rename_pane(1, "Editor"));
+        assert!(tab.rename_pane(3, "Logs"));
+        assert!(tab.layout.set_ratio(20, 1.5));
+        match &tab.layout {
+            Layout::Split { ratio, second, .. } => {
+                assert_eq!(*ratio, 0.5);
+                assert!(matches!(second.as_ref(), Layout::Split { ratio, .. } if *ratio == 0.85));
+            }
+            _ => panic!("expected outer split"),
+        }
+        assert_eq!(tab.pane_title(1), Some("Editor"));
+        assert_eq!(tab.pane_title(3), Some("Logs"));
     }
 
     #[test]
