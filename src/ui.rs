@@ -1,5 +1,5 @@
 use crate::appearance::Palette;
-use gpui::{AssetSource, SharedString, div, prelude::*, px, rgb, rgba, svg};
+use gpui::{AssetSource, ElementId, SharedString, div, prelude::*, px, rgb, rgba, svg};
 use std::borrow::Cow;
 
 gpui::actions!(controls, [FocusControls]);
@@ -105,6 +105,10 @@ const ICONS: &[(&str, &str)] = &[
         "split-down",
         "<rect x='3' y='4' width='18' height='16' rx='2'/><path d='M3 12h18'/>",
     ),
+    (
+        "tab-zoom-frame",
+        "<path stroke-width='1.2' stroke-linecap='butt' d='M1 6V5a4 4 0 0 1 4-4h1M9 1h6M18 1h1a4 4 0 0 1 4 4v1M23 9v6M23 18v1a4 4 0 0 1-4 4h-1M15 23H9M6 23H5a4 4 0 0 1-4-4v-1M1 15V9'/>",
+    ),
     ("zen", "<path d='M8 3H3v5m13-5h5v5M3 16v5h5m13-5v5h-5'/>"),
 ];
 
@@ -159,6 +163,38 @@ pub fn icon(name: &'static str) -> gpui::Svg {
         .size(px(15.0))
         .flex_shrink_0()
         .text_color(rgb(MUTED))
+}
+
+/// A tab icon whose dashed frame marks the tab's maximized pane.
+pub fn tab_icon_frame(
+    id: impl Into<ElementId>,
+    name: &'static str,
+    size: f32,
+    zoomed: bool,
+    icon_color: gpui::Rgba,
+    frame_color: gpui::Rgba,
+) -> gpui::Stateful<gpui::Div> {
+    // Reserve the frame's space in both states; its overlay cannot move the label.
+    let extent = size + 7.0;
+    div()
+        .id(id)
+        .relative()
+        .flex_none()
+        .size(px(extent))
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(icon(name).size(px(size)).text_color(icon_color))
+        .when(zoomed, |frame| {
+            frame.child(
+                icon("tab-zoom-frame")
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size(px(extent))
+                    .text_color(frame_color),
+            )
+        })
 }
 
 pub fn control_icon(
@@ -318,6 +354,7 @@ pub fn block_terminal_actions(mut element: gpui::Stateful<gpui::Div>) -> gpui::S
         Box::new(crate::SelectTab::default()),
         Box::new(crate::SplitRight),
         Box::new(crate::SplitDown),
+        Box::new(crate::TogglePaneZoom),
         Box::new(crate::ToggleZen),
         Box::new(crate::ToggleSidebar),
         Box::new(crate::ToggleSettings),

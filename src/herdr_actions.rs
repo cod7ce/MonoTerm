@@ -57,9 +57,10 @@ impl HerdrWindow {
         });
     }
 
-    fn actions_available(&self, cx: &Context<Self>) -> bool {
+    pub(super) fn actions_available(&self, cx: &Context<Self>) -> bool {
         self.workspace_menu.is_none()
             && self.sidebar_menu.is_none()
+            && self.tab_menu.is_none()
             && !self.link_menu_open()
             && self.composition.is_empty()
             && self
@@ -124,6 +125,18 @@ impl HerdrWindow {
             .and_then(|snapshot| snapshot.focused_pane_id.clone());
         if let Some(id) = id {
             self.perform(cx, |connection| connection.split_pane(&id, direction));
+        }
+    }
+
+    pub(super) fn toggle_pane_zoom(&mut self, cx: &mut Context<Self>) {
+        let id = self
+            .connection
+            .read(cx)
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.focused_pane_id.clone());
+        if let Some(id) = id {
+            self.perform(cx, |connection| connection.toggle_pane_zoom(&id));
         }
     }
 

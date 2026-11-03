@@ -1298,6 +1298,7 @@ impl SettingsWindow {
                     ("Split right / down", "⌘D / ⌘⇧D"),
                     ("Previous / next pane", "⌘[ / ⌘]"),
                     ("Previous / next pane (aliases)", "⌘⌥← / ⌘⌥→"),
+                    ("Maximize / restore current pane", "⌘⇧↵"),
                 ],
             ))
             .child(self.description("⌘9 selects tab 9. An index with no tab does nothing."))

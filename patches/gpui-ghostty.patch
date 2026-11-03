@@ -2814,7 +2814,7 @@ index 9338d63..b47d2f7 100644
 +    assert_eq!(session.take_clipboard_write().as_deref(), Some("hi"));
 +}
 diff --git a/crates/gpui_ghostty_terminal/src/view/mod.rs b/crates/gpui_ghostty_terminal/src/view/mod.rs
-index 6d680bc..a81dda4 100644
+index 6d680bc..62b8a23 100644
 --- a/crates/gpui_ghostty_terminal/src/view/mod.rs
 +++ b/crates/gpui_ghostty_terminal/src/view/mod.rs
 @@ -1,5 +1,5 @@
@@ -3010,16 +3010,52 @@ index 6d680bc..a81dda4 100644
  type TerminalSendFn = dyn Fn(&[u8]) + Send + Sync + 'static;
  
  pub struct TerminalInput {
-@@ -207,6 +214,8 @@ impl TerminalInput {
+@@ -207,6 +214,44 @@ impl TerminalInput {
      }
  }
  
++/// Converts native wheel deltas to terminal rows without dropping fractional motion.
++/// Each destination keeps its own accumulator; reset it when the destination changes.
++#[derive(Default)]
++pub struct ScrollAccumulator {
++    remainder: f64,
++}
++
++impl ScrollAccumulator {
++    pub fn reset(&mut self) {
++        self.remainder = 0.0;
++    }
++
++    pub fn take_lines(&mut self, delta: ScrollDelta, cell_height: f32) -> i32 {
++        let lines = match delta {
++            ScrollDelta::Lines(delta) => f64::from(delta.y),
++            ScrollDelta::Pixels(delta) if cell_height.is_finite() && cell_height > 0.0 => {
++                f64::from(f32::from(delta.y)) / f64::from(cell_height)
++            }
++            ScrollDelta::Pixels(_) => return 0,
++        };
++        if !lines.is_finite() || lines == 0.0 {
++            return 0;
++        }
++        // A reversal must not first consume residual motion in the old direction.
++        if self.remainder.signum() != lines.signum() {
++            self.reset();
++        }
++        let total = self.remainder + lines;
++        self.remainder = total.fract();
++        // Bound malformed device input to the wire protocol's maximum row count.
++        total
++            .trunc()
++            .clamp(-f64::from(u16::MAX), f64::from(u16::MAX)) as i32
++    }
++}
++
 +type CopyCallback = Box<dyn Fn(&mut Window, &mut App)>;
 +
  pub struct TerminalView {
      session: TerminalSession,
      appearance: TerminalAppearance,
-@@ -214,15 +223,28 @@ pub struct TerminalView {
+@@ -214,15 +259,29 @@ pub struct TerminalView {
      viewport_line_offsets: Vec<usize>,
      viewport_total_len: usize,
      viewport_style_runs: Vec<Vec<StyleRun>>,
@@ -3028,6 +3064,7 @@ index 6d680bc..a81dda4 100644
      line_layout_key: Option<(Pixels, Pixels)>,
      last_bounds: Option<Bounds<Pixels>>,
 +    last_cell_metrics: Option<(f32, f32)>,
++    scroll: ScrollAccumulator,
 +    physical_cell_size: Option<(u32, u32)>,
 +    image_cache: ImageCache,
 +    image_cleanup_registered: bool,
@@ -3048,7 +3085,7 @@ index 6d680bc..a81dda4 100644
      marked_text: Option<SharedString>,
      marked_selected_range_utf16: Range<usize>,
      font: gpui::Font,
-@@ -258,15 +280,28 @@ impl TerminalView {
+@@ -258,15 +317,29 @@ impl TerminalView {
              viewport_line_offsets: Vec::new(),
              viewport_total_len: 0,
              viewport_style_runs: Vec::new(),
@@ -3057,6 +3094,7 @@ index 6d680bc..a81dda4 100644
              line_layout_key: None,
              last_bounds: None,
 +            last_cell_metrics: None,
++            scroll: ScrollAccumulator::default(),
 +            physical_cell_size: None,
 +            image_cache: ImageCache::default(),
 +            image_cleanup_registered: false,
@@ -3077,7 +3115,7 @@ index 6d680bc..a81dda4 100644
              marked_text: None,
              marked_selected_range_utf16: 0..0,
              font: crate::default_terminal_font(),
-@@ -274,6 +309,16 @@ impl TerminalView {
+@@ -274,6 +347,16 @@ impl TerminalView {
          .with_refreshed_viewport()
      }
  
@@ -3094,7 +3132,7 @@ index 6d680bc..a81dda4 100644
      fn on_tab(&mut self, _: &Tab, _window: &mut Window, cx: &mut Context<Self>) {
          self.send_tab(false, cx);
      }
-@@ -283,6 +328,9 @@ impl TerminalView {
+@@ -283,6 +366,9 @@ impl TerminalView {
      }
  
      fn send_tab(&mut self, reverse: bool, cx: &mut Context<Self>) {
@@ -3104,7 +3142,7 @@ index 6d680bc..a81dda4 100644
          if reverse {
              self.send_input_parts(&[b"\x1b[Z"], cx);
          } else {
-@@ -307,15 +355,28 @@ impl TerminalView {
+@@ -307,15 +393,29 @@ impl TerminalView {
              viewport_line_offsets: Vec::new(),
              viewport_total_len: 0,
              viewport_style_runs: Vec::new(),
@@ -3113,6 +3151,7 @@ index 6d680bc..a81dda4 100644
              line_layout_key: None,
              last_bounds: None,
 +            last_cell_metrics: None,
++            scroll: ScrollAccumulator::default(),
 +            physical_cell_size: None,
 +            image_cache: ImageCache::default(),
 +            image_cleanup_registered: false,
@@ -3133,7 +3172,7 @@ index 6d680bc..a81dda4 100644
              marked_text: None,
              marked_selected_range_utf16: 0..0,
              font: crate::default_terminal_font(),
-@@ -330,9 +391,24 @@ impl TerminalView {
+@@ -330,9 +430,24 @@ impl TerminalView {
      /// preserved. The view must be hosted over a transparent parent/window to
      /// expose content behind the window.
      ///
@@ -3160,7 +3199,7 @@ index 6d680bc..a81dda4 100644
      pub fn set_appearance(
          &mut self,
          foreground: [u8; 3],
-@@ -435,6 +511,8 @@ impl TerminalView {
+@@ -435,6 +550,8 @@ impl TerminalView {
              return;
          }
  
@@ -3169,7 +3208,7 @@ index 6d680bc..a81dda4 100644
          let total_utf16 = Self::utf16_len(&text);
          let selected = selected_range_utf16.unwrap_or(total_utf16..total_utf16);
          let selected = selected.start.min(total_utf16)..selected.end.min(total_utf16);
-@@ -452,11 +530,20 @@ impl TerminalView {
+@@ -452,11 +569,20 @@ impl TerminalView {
          self.send_input_parts(&[text.as_bytes()], cx);
      }
  
@@ -3191,7 +3230,7 @@ index 6d680bc..a81dda4 100644
          if let Some(input) = self.input.as_ref() {
              for bytes in parts {
                  input.send(bytes);
-@@ -472,6 +559,7 @@ impl TerminalView {
+@@ -472,6 +598,7 @@ impl TerminalView {
      }
  
      fn feed_output_bytes_to_session(&mut self, bytes: &[u8]) {
@@ -3199,7 +3238,7 @@ index 6d680bc..a81dda4 100644
          if let Some(input) = self.input.as_ref() {
              let _ = self
                  .session
-@@ -490,12 +578,16 @@ impl TerminalView {
+@@ -490,12 +617,16 @@ impl TerminalView {
              return;
          }
  
@@ -3217,7 +3256,7 @@ index 6d680bc..a81dda4 100644
              self.refresh_viewport();
              return;
          }
-@@ -514,6 +606,7 @@ impl TerminalView {
+@@ -514,6 +645,7 @@ impl TerminalView {
          if delta > 0 {
              self.viewport_lines.rotate_left(delta_abs);
              self.viewport_style_runs.rotate_left(delta_abs);
@@ -3225,7 +3264,7 @@ index 6d680bc..a81dda4 100644
              if has_layouts {
                  self.line_layouts.rotate_left(delta_abs);
              }
-@@ -521,6 +614,7 @@ impl TerminalView {
+@@ -521,6 +653,7 @@ impl TerminalView {
              for idx in rows - delta_abs..rows {
                  self.viewport_lines[idx].clear();
                  self.viewport_style_runs[idx].clear();
@@ -3233,7 +3272,7 @@ index 6d680bc..a81dda4 100644
                  if has_layouts {
                      self.line_layouts[idx] = None;
                  }
-@@ -533,6 +627,7 @@ impl TerminalView {
+@@ -533,6 +666,7 @@ impl TerminalView {
  
          self.viewport_lines.rotate_right(delta_abs);
          self.viewport_style_runs.rotate_right(delta_abs);
@@ -3241,7 +3280,7 @@ index 6d680bc..a81dda4 100644
          if has_layouts {
              self.line_layouts.rotate_right(delta_abs);
          }
-@@ -540,6 +635,7 @@ impl TerminalView {
+@@ -540,6 +674,7 @@ impl TerminalView {
          for idx in 0..delta_abs {
              self.viewport_lines[idx].clear();
              self.viewport_style_runs[idx].clear();
@@ -3249,7 +3288,7 @@ index 6d680bc..a81dda4 100644
              if has_layouts {
                  self.line_layouts[idx] = None;
              }
-@@ -549,9 +645,43 @@ impl TerminalView {
+@@ -549,9 +684,43 @@ impl TerminalView {
          let _ = self.apply_dirty_viewport_rows(&dirty_rows);
      }
  
@@ -3293,7 +3332,7 @@ index 6d680bc..a81dda4 100644
  
          let dirty = self.session.take_dirty_viewport_rows();
          if !dirty.is_empty() && !self.apply_dirty_viewport_rows(&dirty) {
-@@ -565,10 +695,18 @@ impl TerminalView {
+@@ -565,10 +734,18 @@ impl TerminalView {
      }
  
      fn refresh_viewport(&mut self) {
@@ -3312,7 +3351,7 @@ index 6d680bc..a81dda4 100644
          self.viewport_style_runs = (0..self.session.rows())
              .map(|row| {
                  self.session
-@@ -640,27 +778,6 @@ impl TerminalView {
+@@ -640,27 +817,6 @@ impl TerminalView {
          out
      }
  
@@ -3340,7 +3379,7 @@ index 6d680bc..a81dda4 100644
      fn apply_dirty_viewport_rows(&mut self, dirty_rows: &[u16]) -> bool {
          if dirty_rows.is_empty() {
              return false;
-@@ -671,11 +788,14 @@ impl TerminalView {
+@@ -671,11 +827,14 @@ impl TerminalView {
              self.refresh_viewport();
              return true;
          }
@@ -3356,7 +3395,7 @@ index 6d680bc..a81dda4 100644
          for &row in dirty_rows {
              let row = row as usize;
              if row >= self.viewport_lines.len() {
-@@ -690,25 +810,44 @@ impl TerminalView {
+@@ -690,25 +849,44 @@ impl TerminalView {
                  }
              };
  
@@ -3409,7 +3448,7 @@ index 6d680bc..a81dda4 100644
          self.pending_refresh = true;
          cx.notify();
      }
-@@ -721,7 +860,8 @@ impl TerminalView {
+@@ -721,7 +899,8 @@ impl TerminalView {
  
      pub fn feed_output_bytes(&mut self, bytes: &[u8], cx: &mut Context<Self>) {
          self.feed_output_bytes_to_session(bytes);
@@ -3419,7 +3458,7 @@ index 6d680bc..a81dda4 100644
          self.apply_side_effects(cx);
          cx.notify();
      }
-@@ -739,6 +879,7 @@ impl TerminalView {
+@@ -739,6 +918,7 @@ impl TerminalView {
              let pending = std::mem::take(&mut self.pending_output);
              self.feed_output_bytes_to_session(&pending);
              self.apply_side_effects(cx);
@@ -3427,7 +3466,7 @@ index 6d680bc..a81dda4 100644
              self.reconcile_dirty_viewport_after_output();
          }
  
-@@ -750,6 +891,7 @@ impl TerminalView {
+@@ -750,6 +930,7 @@ impl TerminalView {
                  offset = end;
              }
              self.apply_side_effects(cx);
@@ -3435,7 +3474,7 @@ index 6d680bc..a81dda4 100644
              self.reconcile_dirty_viewport_after_output();
              cx.notify();
              return;
-@@ -767,6 +909,9 @@ impl TerminalView {
+@@ -767,6 +948,9 @@ impl TerminalView {
      }
  
      fn on_paste(&mut self, _: &Paste, _window: &mut Window, cx: &mut Context<Self>) {
@@ -3445,7 +3484,7 @@ index 6d680bc..a81dda4 100644
          let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
              return;
          };
-@@ -778,22 +923,41 @@ impl TerminalView {
+@@ -778,22 +962,41 @@ impl TerminalView {
          }
      }
  
@@ -3494,7 +3533,7 @@ index 6d680bc..a81dda4 100644
          self.selection = Some(ByteSelection {
              anchor: 0,
              active: self.viewport_total_len,
-@@ -809,41 +973,17 @@ impl TerminalView {
+@@ -809,41 +1012,17 @@ impl TerminalView {
          cx: &mut Context<Self>,
      ) {
          self.focus_handle.focus(window, cx);
@@ -3542,7 +3581,7 @@ index 6d680bc..a81dda4 100644
          }
  
          if event.modifiers.shift
-@@ -858,6 +998,7 @@ impl TerminalView {
+@@ -858,6 +1037,7 @@ impl TerminalView {
                      anchor: index,
                      active: index,
                  });
@@ -3550,7 +3589,7 @@ index 6d680bc..a81dda4 100644
                  cx.notify();
              }
              return;
-@@ -888,17 +1029,33 @@ impl TerminalView {
+@@ -888,17 +1068,33 @@ impl TerminalView {
      }
  
      fn on_mouse_up(&mut self, event: &MouseUpEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -3590,7 +3629,7 @@ index 6d680bc..a81dda4 100644
              return;
          }
  
-@@ -932,7 +1089,18 @@ impl TerminalView {
+@@ -932,7 +1128,18 @@ impl TerminalView {
          window: &mut Window,
          cx: &mut Context<Self>,
      ) {
@@ -3610,7 +3649,7 @@ index 6d680bc..a81dda4 100644
              && self.input.is_some()
              && self.session.mouse_reporting_enabled()
              && self.session.mouse_sgr_enabled()
-@@ -973,11 +1141,7 @@ impl TerminalView {
+@@ -973,11 +1180,7 @@ impl TerminalView {
              }
          }
  
@@ -3623,7 +3662,7 @@ index 6d680bc..a81dda4 100644
              return;
          }
  
-@@ -994,6 +1158,13 @@ impl TerminalView {
+@@ -994,6 +1197,13 @@ impl TerminalView {
      }
  
      fn on_key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
@@ -3637,7 +3676,7 @@ index 6d680bc..a81dda4 100644
          let raw_keystroke = event.keystroke.clone();
          if should_skip_key_down_for_ime(self.input.is_some(), &raw_keystroke) {
              return;
-@@ -1006,7 +1177,7 @@ impl TerminalView {
+@@ -1006,7 +1216,7 @@ impl TerminalView {
  
          let scroll_step = (self.session.rows() as i32 / 2).max(1);
  
@@ -3646,7 +3685,7 @@ index 6d680bc..a81dda4 100644
              if keystroke.modifiers.shift {
                  match keystroke.key.as_str() {
                      "home" => {
-@@ -1044,15 +1215,14 @@ impl TerminalView {
+@@ -1044,15 +1254,14 @@ impl TerminalView {
              if keystroke.modifiers.control
                  && let Some(b) = ctrl_byte_for_keystroke(&keystroke)
              {
@@ -3664,7 +3703,7 @@ index 6d680bc..a81dda4 100644
                  return;
              }
  
-@@ -1063,7 +1233,7 @@ impl TerminalView {
+@@ -1063,7 +1272,7 @@ impl TerminalView {
                  super_key: false,
              };
              if let Some(encoded) = encode_key_named(&keystroke.key, modifiers) {
@@ -3673,7 +3712,7 @@ index 6d680bc..a81dda4 100644
                  return;
              }
              return;
-@@ -1108,20 +1278,7 @@ impl TerminalView {
+@@ -1108,20 +1317,7 @@ impl TerminalView {
              super_key: false,
          };
          if let Some(encoded) = encode_key_named(&keystroke.key, modifiers) {
@@ -3695,15 +3734,38 @@ index 6d680bc..a81dda4 100644
          }
      }
  
-@@ -1131,6 +1288,7 @@ impl TerminalView {
+@@ -1131,12 +1327,9 @@ impl TerminalView {
          window: &mut Window,
          cx: &mut Context<Self>,
      ) {
+-        let dy_lines: f32 = match event.delta {
+-            ScrollDelta::Lines(p) => p.y,
+-            ScrollDelta::Pixels(p) => f32::from(p.y) / 16.0,
+-        };
+-
+-        let delta_lines = (-dy_lines).round() as i32;
 +        self.cancel_link_interaction();
-         let dy_lines: f32 = match event.delta {
-             ScrollDelta::Lines(p) => p.y,
-             ScrollDelta::Pixels(p) => f32::from(p.y) / 16.0,
-@@ -1182,8 +1340,9 @@ impl TerminalView {
++        let cell_height = self.last_cell_metrics.map_or(0.0, |(_, height)| height);
++        let delta_lines = -self.scroll.take_lines(event.delta, cell_height);
+         if delta_lines == 0 {
+             return;
+         }
+@@ -1158,11 +1351,9 @@ impl TerminalView {
+                 event.modifiers.alt,
+                 event.modifiers.control,
+             );
+-            let steps = delta_lines.unsigned_abs().min(10);
+-            for _ in 0..steps {
+-                let seq = sgr_mouse_sequence(button_value, col, row, true);
+-                input.send(seq.as_bytes());
+-            }
++            let seq = sgr_mouse_sequence(button_value, col, row, true);
++            let reports = seq.repeat(delta_lines.unsigned_abs() as usize);
++            input.send(reports.as_bytes());
+             return;
+         }
+ 
+@@ -1182,8 +1373,9 @@ impl TerminalView {
              return None;
          }
  
@@ -3715,7 +3777,7 @@ index 6d680bc..a81dda4 100644
          let mut row_index = (y / cell_height).floor() as i32;
          if row_index < 0 {
              row_index = 0;
-@@ -1194,9 +1353,7 @@ impl TerminalView {
+@@ -1194,9 +1386,7 @@ impl TerminalView {
          let row_index = row_index as usize;
  
          if let Some(Some(line)) = self.line_layouts.get(row_index) {
@@ -3726,7 +3788,7 @@ index 6d680bc..a81dda4 100644
              let offset = *self.viewport_line_offsets.get(row_index).unwrap_or(&0);
              return Some(offset.saturating_add(byte_index));
          }
-@@ -1204,7 +1361,8 @@ impl TerminalView {
+@@ -1204,7 +1394,8 @@ impl TerminalView {
          let (col, row) = self.mouse_position_to_cell(position, window)?;
          let row_index = row.saturating_sub(1) as usize;
          let line = self.viewport_lines.get(row_index)?.as_str();
@@ -3736,7 +3798,7 @@ index 6d680bc..a81dda4 100644
          let offset = *self.viewport_line_offsets.get(row_index).unwrap_or(&0);
          Some(offset.saturating_add(byte_index))
      }
-@@ -1212,13 +1370,13 @@ impl TerminalView {
+@@ -1212,13 +1403,13 @@ impl TerminalView {
      fn mouse_position_to_cell(
          &self,
          position: gpui::Point<gpui::Pixels>,
@@ -3752,7 +3814,7 @@ index 6d680bc..a81dda4 100644
          let x = f32::from(position.x);
          let y = f32::from(position.y);
  
-@@ -1352,6 +1510,7 @@ impl EntityInputHandler for TerminalView {
+@@ -1352,6 +1543,7 @@ impl EntityInputHandler for TerminalView {
  }
  
  struct TerminalPrepaintState {
@@ -3760,7 +3822,7 @@ index 6d680bc..a81dda4 100644
      line_height: Pixels,
      shaped_lines: Vec<gpui::ShapedLine>,
      background_quads: Vec<PaintQuad>,
-@@ -1369,6 +1528,7 @@ const CELL_STYLE_FLAG_UNDERLINE: u8 = 0x08;
+@@ -1369,6 +1561,7 @@ const CELL_STYLE_FLAG_UNDERLINE: u8 = 0x08;
  const CELL_STYLE_FLAG_FAINT: u8 = 0x10;
  const CELL_STYLE_FLAG_INVISIBLE: u8 = 0x20;
  const CELL_STYLE_FLAG_STRIKETHROUGH: u8 = 0x40;
@@ -3768,7 +3830,7 @@ index 6d680bc..a81dda4 100644
  
  #[derive(Clone, Copy, Debug, PartialEq)]
  struct TerminalAppearance {
-@@ -1404,10 +1564,16 @@ impl TerminalAppearance {
+@@ -1404,10 +1597,16 @@ impl TerminalAppearance {
              } else {
                  (default_fg, default_bg, self.foreground, self.background)
              };
@@ -3787,7 +3849,7 @@ index 6d680bc..a81dda4 100644
              run.bg = target_bg;
          }
          if run.flags & CELL_STYLE_FLAG_INVISIBLE != 0 {
-@@ -1419,7 +1585,8 @@ impl TerminalAppearance {
+@@ -1419,7 +1618,8 @@ impl TerminalAppearance {
  
  fn has_default_background(run: &StyleRun, default_bg: Rgb) -> bool {
      // Inverse backgrounds represent the original foreground and stay opaque.
@@ -3797,7 +3859,7 @@ index 6d680bc..a81dda4 100644
  }
  
  fn bounds_outside(bounds: Bounds<Pixels>, excluded: Option<Bounds<Pixels>>) -> Vec<Bounds<Pixels>> {
-@@ -1523,20 +1690,21 @@ pub(crate) const BOX_DIR_DOWN: u8 = 0x08;
+@@ -1523,20 +1723,21 @@ pub(crate) const BOX_DIR_DOWN: u8 = 0x08;
  pub(crate) fn box_drawing_mask(ch: char) -> Option<(u8, f32)> {
      let light = 1.0;
      let heavy = 1.35;
@@ -3831,7 +3893,7 @@ index 6d680bc..a81dda4 100644
          _ => return None,
      };
  
-@@ -1544,9 +1712,6 @@ pub(crate) fn box_drawing_mask(ch: char) -> Option<(u8, f32)> {
+@@ -1544,9 +1745,6 @@ pub(crate) fn box_drawing_mask(ch: char) -> Option<(u8, f32)> {
          '━' | '┃' | '┏' | '┓' | '┗' | '┛' | '┣' | '┫' | '┳' | '┻' | '╋' => {
              heavy
          }
@@ -3841,7 +3903,7 @@ index 6d680bc..a81dda4 100644
          _ => light,
      };
  
-@@ -1640,33 +1805,154 @@ fn text_run_for_key(base_font: &gpui::Font, key: TextRunKey, len: usize) -> Text
+@@ -1640,33 +1838,154 @@ fn text_run_for_key(base_font: &gpui::Font, key: TextRunKey, len: usize) -> Text
      }
  }
  
@@ -4012,7 +4074,7 @@ index 6d680bc..a81dda4 100644
      line.len()
  }
  
-@@ -1737,9 +2023,45 @@ impl Element for TerminalTextElement {
+@@ -1737,9 +2056,45 @@ impl Element for TerminalTextElement {
          let run_font = style.font();
          let run_color = style.color;
  
@@ -4059,7 +4121,7 @@ index 6d680bc..a81dda4 100644
              if view.viewport_lines.is_empty() {
                  view.line_layouts.clear();
                  view.line_layout_key = None;
-@@ -1784,13 +2106,14 @@ impl Element for TerminalTextElement {
+@@ -1784,13 +2139,14 @@ impl Element for TerminalTextElement {
                                      | CELL_STYLE_FLAG_STRIKETHROUGH),
                          };
  
@@ -4080,7 +4142,7 @@ index 6d680bc..a81dda4 100644
  
                          if start > byte_pos {
                              runs.push(TextRun {
-@@ -1833,15 +2156,22 @@ impl Element for TerminalTextElement {
+@@ -1833,15 +2189,22 @@ impl Element for TerminalTextElement {
                      });
                  }
  
@@ -4111,7 +4173,7 @@ index 6d680bc..a81dda4 100644
              }
          });
  
-@@ -2027,7 +2357,6 @@ impl Element for TerminalTextElement {
+@@ -2027,7 +2390,6 @@ impl Element for TerminalTextElement {
  
          let box_drawing_quads = cell_metrics(window, &font)
              .map(|(cell_width, _)| {
@@ -4119,7 +4181,7 @@ index 6d680bc..a81dda4 100644
                  let mut quads = Vec::new();
  
                  let view = self.view.read(cx);
-@@ -2036,12 +2365,11 @@ impl Element for TerminalTextElement {
+@@ -2036,12 +2398,11 @@ impl Element for TerminalTextElement {
                      let runs = view.viewport_style_runs.get(row).map(|v| v.as_slice());
                      let mut run_idx: usize = 0;
  
@@ -4136,7 +4198,7 @@ index 6d680bc..a81dda4 100644
  
                          if let Some((_, _)) = box_drawing_mask(ch) {
                              let fg = runs
-@@ -2084,8 +2412,6 @@ impl Element for TerminalTextElement {
+@@ -2084,8 +2445,6 @@ impl Element for TerminalTextElement {
                                  ch,
                              ));
                          }
@@ -4145,7 +4207,7 @@ index 6d680bc..a81dda4 100644
                      }
                  }
  
-@@ -2095,18 +2421,15 @@ impl Element for TerminalTextElement {
+@@ -2095,18 +2454,15 @@ impl Element for TerminalTextElement {
  
          let cursor = {
              let view = self.view.read(cx);
@@ -4167,7 +4229,7 @@ index 6d680bc..a81dda4 100644
  
              Some(fill(
                  Bounds::new(point(x, y), size(px(2.0), line_height)),
-@@ -2115,6 +2438,7 @@ impl Element for TerminalTextElement {
+@@ -2115,6 +2471,7 @@ impl Element for TerminalTextElement {
          });
  
          TerminalPrepaintState {
@@ -4175,7 +4237,7 @@ index 6d680bc..a81dda4 100644
              line_height,
              shaped_lines,
              background_quads,
-@@ -2137,80 +2461,127 @@ impl Element for TerminalTextElement {
+@@ -2137,80 +2494,127 @@ impl Element for TerminalTextElement {
          cx: &mut App,
      ) {
          self.view.update(cx, |view, _cx| {
@@ -4352,7 +4414,7 @@ index 6d680bc..a81dda4 100644
          });
      }
  }
-@@ -2218,13 +2589,31 @@ impl Element for TerminalTextElement {
+@@ -2218,13 +2622,31 @@ impl Element for TerminalTextElement {
  impl Render for TerminalView {
      fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
          ensure_key_bindings(cx);
@@ -4385,7 +4447,7 @@ index 6d680bc..a81dda4 100644
  
          if self.pending_refresh {
              self.refresh_viewport();
-@@ -2243,9 +2632,26 @@ impl Render for TerminalView {
+@@ -2243,9 +2665,26 @@ impl Render for TerminalView {
              }
          }
  
@@ -4412,7 +4474,7 @@ index 6d680bc..a81dda4 100644
              .track_focus(&self.focus_handle)
              .key_context(KEY_CONTEXT)
              .on_action(cx.listener(Self::on_copy))
-@@ -2262,13 +2668,38 @@ impl Render for TerminalView {
+@@ -2262,13 +2701,38 @@ impl Render for TerminalView {
              .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
              .on_mouse_up(MouseButton::Middle, cx.listener(Self::on_mouse_up))
              .on_mouse_up(MouseButton::Right, cx.listener(Self::on_mouse_up))
@@ -4451,13 +4513,22 @@ index 6d680bc..a81dda4 100644
  pub(crate) fn cell_metrics(window: &mut gpui::Window, font: &gpui::Font) -> Option<(f32, f32)> {
      let mut style = window.text_style();
      style.font_family = font.family.clone();
-@@ -2301,30 +2732,7 @@ pub(crate) fn cell_metrics(window: &mut gpui::Window, font: &gpui::Font) -> Opti
+@@ -2301,29 +2765,67 @@ pub(crate) fn cell_metrics(window: &mut gpui::Window, font: &gpui::Font) -> Opti
  mod tests {
      use ghostty_vt::Rgb;
  
 -    use super::{url_at_byte_index, url_at_column_in_line, window_position_to_local};
--
--    #[test]
++    use super::window_position_to_local;
++
++    fn wheel_lines(lines: f32) -> gpui::ScrollDelta {
++        gpui::ScrollDelta::Lines(gpui::point(0.0, lines))
++    }
++
++    fn wheel_pixels(pixels: f32) -> gpui::ScrollDelta {
++        gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.0), gpui::px(pixels)))
++    }
+ 
+     #[test]
 -    fn url_detection_finds_https_links() {
 -        let text = "Visit https://google.com for search";
 -        let idx = text.find("google").unwrap();
@@ -4465,25 +4536,68 @@ index 6d680bc..a81dda4 100644
 -            url_at_byte_index(text, idx).as_deref(),
 -            Some("https://google.com")
 -        );
--    }
--
--    #[test]
++    fn wheel_preserves_small_motion_and_native_line_magnitude() {
++        let mut scroll = super::ScrollAccumulator::default();
++        for _ in 0..3 {
++            assert_eq!(scroll.take_lines(wheel_pixels(5.0), 20.0), 0);
++        }
++        assert_eq!(scroll.take_lines(wheel_pixels(5.0), 20.0), 1);
++        assert_eq!(scroll.take_lines(wheel_pixels(160.0), 20.0), 8);
++        assert_eq!(scroll.take_lines(wheel_pixels(320.0), 40.0), 8);
++        assert_eq!(scroll.take_lines(wheel_lines(24.0), 40.0), 24);
++        assert_eq!(scroll.take_lines(wheel_lines(240.0), 10.0), 240);
+     }
+ 
+     #[test]
 -    fn url_detection_finds_https_links_by_cell_column() {
 -        let line = "https://google.com";
 -        assert_eq!(
 -            url_at_column_in_line(line, 1).as_deref(),
 -            Some("https://google.com")
 -        );
--        assert_eq!(
++    fn wheel_event_partitioning_preserves_total_distance() {
++        let mut small = super::ScrollAccumulator::default();
++        let mut large = super::ScrollAccumulator::default();
++        let steps: i32 = (0..100)
++            .map(|_| small.take_lines(wheel_pixels(3.0), 20.0))
++            .sum();
++        assert_eq!(steps, large.take_lines(wheel_pixels(300.0), 20.0));
++        assert_eq!(steps, 15);
++    }
++
++    #[test]
++    fn wheel_reversal_and_destination_reset_discard_old_fraction() {
++        let mut scroll = super::ScrollAccumulator::default();
++        assert_eq!(scroll.take_lines(wheel_lines(0.75), 20.0), 0);
++        assert_eq!(scroll.take_lines(wheel_lines(-0.5), 20.0), 0);
++        assert_eq!(scroll.take_lines(wheel_lines(-0.5), 20.0), -1);
++        assert_eq!(scroll.take_lines(wheel_lines(0.75), 20.0), 0);
++        scroll.reset();
++        assert_eq!(scroll.take_lines(wheel_lines(0.25), 20.0), 0);
++        assert_eq!(scroll.take_lines(wheel_lines(0.75), 20.0), 1);
++    }
++
++    #[test]
++    fn wheel_rejects_invalid_deltas_without_poisoning_later_events() {
++        let mut scroll = super::ScrollAccumulator::default();
++        for delta in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
++            assert_eq!(scroll.take_lines(wheel_lines(delta), 20.0), 0);
++        }
++        for height in [0.0, -1.0, f32::NAN, f32::INFINITY] {
++            assert_eq!(scroll.take_lines(wheel_pixels(20.0), height), 0);
++        }
+         assert_eq!(
 -            url_at_column_in_line(line, 10).as_deref(),
 -            Some("https://google.com")
--        );
--    }
-+    use super::window_position_to_local;
++            scroll.take_lines(wheel_lines(f32::MAX), 20.0),
++            i32::from(u16::MAX)
+         );
++        assert_eq!(scroll.take_lines(wheel_lines(1.0), 20.0), 1);
++        assert_eq!(scroll.take_lines(wheel_lines(-1.0), 20.0), -1);
+     }
  
      #[test]
-     fn mouse_position_to_local_accounts_for_bounds_origin() {
-@@ -2454,6 +2862,71 @@ mod tests {
+@@ -2454,6 +2956,71 @@ mod tests {
          }
      }
  

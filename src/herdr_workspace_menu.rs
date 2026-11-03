@@ -119,6 +119,7 @@ impl HerdrWindow {
             .and_then(|snapshot| WorktreeSource::new(snapshot, &target).ok());
         self.sidebar_drag = None;
         self.sidebar_menu = None;
+        self.tab_menu = None;
         self.selecting = false;
         self.workspace_menu = Some(WorkspaceMenu {
             target,

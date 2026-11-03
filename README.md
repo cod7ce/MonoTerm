@@ -2,7 +2,7 @@
 
 A native macOS terminal built with Rust, GPUI and Ghostty. Each local pane owns a real PTY; Ghostty handles terminal state and GPUI renders the terminal and application.
 
-**Current version: 0.3.0.** Apple Silicon, macOS 14 or later.
+**Current version: 0.3.1.** Apple Silicon, macOS 14 or later.
 
 ## Features
 
@@ -55,6 +55,7 @@ The app bundle contains its runtime resources and framework. Cargo, Zig and the 
 | Next / previous tab | Ctrl-Tab / Ctrl-Shift-Tab |
 | Split right / below | Cmd-D / Cmd-Shift-D |
 | Previous / next pane | Cmd-[ / Cmd-] (also Cmd-Alt-Left / Cmd-Alt-Right) |
+| Maximize / restore active pane | Cmd-Shift-Enter |
 | Select tab 1–9 | Cmd-1 … Cmd-9 |
 | Previous / next agent in Herdr | Cmd-Shift-[ / Cmd-Shift-] |
 | Customize tab | Cmd-Shift-E, or its context menu |
@@ -66,7 +67,11 @@ The app bundle contains its runtime resources and framework. Cargo, Zig and the 
 | Restart active shell | Cmd-Shift-R |
 | Quit | Cmd-Q |
 
-Shared shortcuts apply in main and Herdr windows. Zen, shell restart and tab customization are main-window actions. In Herdr, indexed tabs refer to the current Space; an absent index does nothing. Pane/tab cycling wraps, and agent cycling follows the Agents list's ordering and filter even when the sidebar is hidden. The native Herdr close button detaches; Cmd-W closes its focused daemon pane and Cmd-Shift-W closes its focused daemon tab.
+Shared shortcuts apply in main and Herdr windows. Zen, shell restart and custom tab icons are main-window actions. Cmd-Shift-E opens local tab customization or Herdr tab renaming; Herdr tabs also support renaming by double-click or context menu. In Herdr, indexed tabs refer to the current Space; an absent index does nothing. Pane/tab cycling wraps, and agent cycling follows the Agents list's ordering and filter even when the sidebar is hidden. The native Herdr close button detaches; Cmd-W closes its focused daemon pane and Cmd-Shift-W closes its focused daemon tab.
+
+Cmd-Shift-Enter maximizes the active pane within its tab in either window; pressing it again restores the split layout. A single-pane tab is unchanged. A dashed frame around the tab icon identifies this state and shows the restore shortcut on hover. Local zoom keeps the original split tree, ratios and running shells; cycling panes changes the maximized pane, splitting restores the layout, and closing the maximized pane reveals its siblings. Herdr uses the daemon's pane zoom state.
+
+The mouse wheel scrolls the pane under the pointer in either window; its magnitude follows the system gesture, including partial rows. In Herdr, wheel input goes to that daemon pane without moving keyboard focus, and the tab strip reveals the tab for the selected agent.
 
 Local limits are 12 tabs, 8 panes per tab and 48 panes total. Closing a pane terminates its shell; closing a tab terminates all its panes. Tabs and pane layouts are not restored after quitting. Preferences are stored under `~/Library/Application Support/MonoTerm/`; `MONOTERM_CONFIG_DIR` selects an isolated test directory.
 
@@ -123,6 +128,8 @@ The 0.1.1 release passed 207 application/component tests (one opt-in ignored), s
 The 0.2.0 release passed 231 application/component tests (one opt-in ignored), strict all-target/all-feature Clippy, formatting, eight native updater scenarios and Ed25519 signature tests. Focused native checks covered the worktree menu (33), sidebar views/tabs (22), WeType composition through metadata updates (12), Dark/Light sidebar colors and spacing (13 each), and inline branch counts at wide/narrow sidebar widths (11); the corresponding screenshots were inspected. The complete live-agent follow regression remains incomplete after a Codex bootstrap timeout. Cross-version download/install/relaunch is not claimed as verified.
 
 The 0.3.0 release passed 246 application/component tests (one opt-in ignored), strict all-target/all-feature Clippy, formatting, eight native updater scenarios, and Ed25519 signature tests. The component patch reproduces all 20 modified source files exactly. Focused native checks covered local shortcuts/preferences (37), Herdr shortcuts/layout (24), Herdr link actions (18), Space rename typing and Pinyin (14), and independent window lifecycles (27); key screenshots were inspected. Local links were also checked through an actual browser request. Full cross-version update installation and system-theme switching remain unverified.
+
+The 0.3.1 release passed 265 application/component tests (one opt-in ignored), strict all-target/all-feature Clippy, formatting, updater lifecycle fixtures, and a signed release build with Ed25519 verification. Focused changes cover Herdr tab styling and renaming, pane zoom in both windows, pointer-directed wheel routing, gesture-scaled scrolling, and revealing the selected agent's tab. Native GUI checks for these changes remain unverified because Accessibility and Screen Recording access were unavailable; cross-version update installation and notarization are not claimed.
 
 Native GUI checks require a logged-in, unlocked macOS desktop and Accessibility/Screen Recording access. Use separate test-owned windows and configurations. Never restart an existing user terminal as part of verification. Existing upstream Rust future-compatibility warnings may still appear.
 

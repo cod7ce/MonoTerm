@@ -36,6 +36,10 @@ impl HerdrWindow {
             cx.notify();
             result
         });
+        if result.is_ok() {
+            // Reselecting the current agent should reveal its tab after manual scrolling too.
+            self.tab_reveal = Default::default();
+        }
         self.record(result, cx);
         self.focus_handle.focus(window, cx);
     }

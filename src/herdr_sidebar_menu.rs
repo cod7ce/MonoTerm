@@ -20,6 +20,7 @@ pub(super) struct SidebarMenu {
 impl HerdrWindow {
     pub(super) fn open_sidebar_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.workspace_menu = None;
+        self.tab_menu = None;
         self.sidebar_drag = None;
         self.selecting = false;
         let menu = SidebarMenu {

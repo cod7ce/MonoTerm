@@ -14,6 +14,7 @@ use gpui::{
     Subscription, TextAlign, TextRun, UTF16Selection, Window, canvas, div, fill, point, prelude::*,
     px, rgb, size,
 };
+use gpui_ghostty_terminal::view::ScrollAccumulator;
 use herdr_protocol::{
     ClientKeyCode, ClientKeyKind, ClientMouseButton, ClientMouseGeometry, ClientMouseKind,
     ClientMousePosition, ClientPaneInputEvent, ClientSurfaceSize, SurfaceRect,
@@ -34,6 +35,8 @@ mod sidebar;
 mod sidebar_menu;
 #[path = "herdr_sidebar_style.rs"]
 mod sidebar_style;
+#[path = "herdr_tab_menu.rs"]
+mod tab_menu;
 #[path = "herdr_workspace_menu.rs"]
 mod workspace_menu;
 
@@ -68,10 +71,12 @@ pub(crate) struct HerdrWindow {
     sidebar_ratio: f32,
     sidebar_drag: Option<SidebarDrag>,
     workspace_menu: Option<workspace_menu::WorkspaceMenu>,
+    tab_menu: Option<tab_menu::TabMenu>,
     shell_corners: shell_surface::CornerCache,
     sidebar_scroll: [gpui::ScrollHandle; 2],
     collapsed_repos: std::collections::HashSet<String>,
     tab_scroll: gpui::ScrollHandle,
+    tab_reveal: chrome::TabReveal,
     indicator_started: std::time::Instant,
     indicator_elapsed: u128,
     indicator_tick: Option<gpui::Task<()>>,
@@ -88,7 +93,8 @@ pub(crate) struct HerdrWindow {
     selection_rect: SurfaceRect,
     selection_token: Option<InputToken>,
     links: links::LinkState,
-    scroll_remainder: f32,
+    scroll: ScrollAccumulator,
+    scroll_target: Option<InputTarget>,
     error: Option<String>,
     trace: bool,
     input_started: Option<(std::time::Instant, u64)>,
@@ -185,10 +191,12 @@ impl HerdrWindow {
             sidebar_ratio: preferences.ratio,
             sidebar_drag: None,
             workspace_menu: None,
+            tab_menu: None,
             shell_corners: shell_surface::CornerCache::default(),
             sidebar_scroll: std::array::from_fn(|_| gpui::ScrollHandle::new()),
             collapsed_repos: preferences.collapsed_repos,
             tab_scroll: gpui::ScrollHandle::new(),
+            tab_reveal: chrome::TabReveal::default(),
             indicator_started: std::time::Instant::now(),
             indicator_elapsed: 0,
             indicator_tick: None,
@@ -210,7 +218,8 @@ impl HerdrWindow {
             },
             selection_token: None,
             links: links::LinkState::default(),
-            scroll_remainder: 0.0,
+            scroll: ScrollAccumulator::default(),
+            scroll_target: None,
             error: None,
             trace: std::env::var_os("MONOTERM_HERDR_TRACE").is_some(),
             input_started: None,
@@ -315,17 +324,19 @@ impl HerdrWindow {
 
     fn send_to(
         &mut self,
-        token: Option<&InputToken>,
-        event: ClientPaneInputEvent,
+        target: Option<&InputTarget>,
+        events: Vec<ClientPaneInputEvent>,
         cx: &mut Context<Self>,
     ) {
-        if !matches!(
-            event,
-            ClientPaneInputEvent::Mouse {
-                kind: ClientMouseKind::Moved,
-                ..
-            }
-        ) {
+        if !events.iter().all(|event| {
+            matches!(
+                event,
+                ClientPaneInputEvent::Mouse {
+                    kind: ClientMouseKind::Moved,
+                    ..
+                }
+            )
+        }) {
             self.cancel_links();
         }
         if self.selection.take().is_some() {
@@ -336,9 +347,9 @@ impl HerdrWindow {
         self.selection_token = None;
         let result = self.connection.update(cx, |connection, cx| {
             let revision = connection.revision();
-            let result = match token {
-                Some(token) => connection.send_input_to(token, [event]),
-                None => connection.send_input([event]),
+            let result = match target {
+                Some(target) => connection.send_input_to_visible(target, events),
+                None => connection.send_input(events),
             };
             if connection.revision() != revision {
                 cx.notify();
@@ -359,11 +370,11 @@ impl HerdrWindow {
     }
 
     fn send(&mut self, event: ClientPaneInputEvent, cx: &mut Context<Self>) {
-        self.send_to(None, event, cx);
+        self.send_to(None, vec![event], cx);
     }
 
     fn key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        if self.workspace_menu.is_some() || self.sidebar_menu.is_some() {
+        if self.workspace_menu.is_some() || self.sidebar_menu.is_some() || self.tab_menu.is_some() {
             return;
         }
         let key = &event.keystroke;
@@ -473,45 +484,7 @@ impl HerdrWindow {
         let Some(surface) = connection.surface.clone() else {
             return;
         };
-        let target = connection.input_target();
-        let (rect, pixel_width, pixel_height, reporting) = if let Some(popup) = &surface.popup {
-            let Some(rect) = herdr_render::popup_rect(&surface)
-                .filter(|rect| herdr_render::contains(*rect, col, row))
-            else {
-                return;
-            };
-            (
-                rect,
-                popup.pixel_width,
-                popup.pixel_height,
-                popup.mouse_reporting,
-            )
-        } else {
-            let Some(pane) = surface
-                .panes
-                .iter()
-                .find(|pane| herdr_render::contains(pane.inner_rect, col, row))
-            else {
-                return;
-            };
-            if target != Some(InputTarget::Pane(pane.pane_id.clone())) {
-                if matches!(kind, ClientMouseKind::Down(_)) {
-                    let result = self.connection.update(cx, |connection, cx| {
-                        let result = connection.focus_pane(&pane.pane_id);
-                        cx.notify();
-                        result
-                    });
-                    self.record(result, cx);
-                }
-                return;
-            }
-            (
-                pane.inner_rect,
-                pane.pixel_width,
-                pane.pixel_height,
-                pane.mouse_reporting,
-            )
-        };
+        let focused_target = connection.input_target();
         let scrolling = matches!(
             kind,
             ClientMouseKind::ScrollUp
@@ -519,6 +492,30 @@ impl HerdrWindow {
                 | ClientMouseKind::ScrollLeft
                 | ClientMouseKind::ScrollRight
         );
+        let Some(MouseTarget {
+            target,
+            rect,
+            pixel_width,
+            pixel_height,
+            reporting,
+            stepwise,
+        }) = mouse_target(&surface, col, row)
+        else {
+            return;
+        };
+        if !scrolling && focused_target.as_ref() != Some(&target) {
+            if matches!(kind, ClientMouseKind::Down(_))
+                && let InputTarget::Pane(pane_id) = &target
+            {
+                let result = self.connection.update(cx, |connection, cx| {
+                    let result = connection.focus_pane(pane_id);
+                    cx.notify();
+                    result
+                });
+                self.record(result, cx);
+            }
+            return;
+        }
         if (!reporting || modifiers.shift) && !scrolling {
             match kind {
                 ClientMouseKind::Down(ClientMouseButton::Left) => {
@@ -535,40 +532,86 @@ impl HerdrWindow {
         }
         let column = col - rect.x;
         let row = row - rect.y;
-        self.send(
-            ClientPaneInputEvent::Mouse {
-                kind,
-                position: ClientMousePosition::Pixels {
-                    column,
-                    row,
-                    x: f32::from(
-                        position.x - self.bounds.left() - self.cell.width * f32::from(rect.x),
-                    )
+        let event = ClientPaneInputEvent::Mouse {
+            kind,
+            position: ClientMousePosition::Pixels {
+                column,
+                row,
+                x: f32::from(position.x - self.bounds.left() - self.cell.width * f32::from(rect.x))
                     .max(0.0) as u32,
-                    y: f32::from(
-                        position.y - self.bounds.top() - self.cell.height * f32::from(rect.y),
-                    )
+                y: f32::from(position.y - self.bounds.top() - self.cell.height * f32::from(rect.y))
                     .max(0.0) as u32,
-                },
-                geometry: Some(ClientMouseGeometry {
-                    cols: rect.width,
-                    rows: rect.height,
-                    width_px: if pixel_width > 0 {
-                        pixel_width
-                    } else {
-                        (f32::from(self.cell.width) * f32::from(rect.width)) as u32
-                    },
-                    height_px: if pixel_height > 0 {
-                        pixel_height
-                    } else {
-                        (f32::from(self.cell.height) * f32::from(rect.height)) as u32
-                    },
-                }),
-                modifiers: modifier_bits(modifiers),
-                lines,
             },
-            cx,
-        );
+            geometry: Some(ClientMouseGeometry {
+                cols: rect.width,
+                rows: rect.height,
+                width_px: if pixel_width > 0 {
+                    pixel_width
+                } else {
+                    (f32::from(self.cell.width) * f32::from(rect.width)) as u32
+                },
+                height_px: if pixel_height > 0 {
+                    pixel_height
+                } else {
+                    (f32::from(self.cell.height) * f32::from(rect.height)) as u32
+                },
+            }),
+            modifiers: modifier_bits(modifiers),
+            lines,
+        };
+        if scrolling {
+            self.send_to(Some(&target), wheel_events(event, stepwise), cx);
+            if self.error.is_some() {
+                self.scroll.reset();
+                self.scroll_target = None;
+            }
+        } else {
+            self.send(event, cx);
+        }
+    }
+
+    fn scroll_wheel(
+        &mut self,
+        event: &gpui::ScrollWheelEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.cancel_links();
+        let target = self.coordinates(event.position).and_then(|(col, row)| {
+            let connection = self.connection.read(cx);
+            let hit = mouse_target(connection.surface.as_ref()?, col, row)?;
+            // A transient projection or fence gap must not discard motion for the
+            // same destination; the token still gates the actual send.
+            connection
+                .visible_input_token(&hit.target)
+                .map(|_| hit.target)
+        });
+        let Some(target) = target else {
+            return;
+        };
+        // Resolve the pane before accumulating, even when this event is less than a row.
+        if self.scroll_target.as_ref() != Some(&target) {
+            self.scroll.reset();
+            self.scroll_target = Some(target);
+        }
+        let lines = self
+            .scroll
+            .take_lines(event.delta, f32::from(self.cell.height));
+        if lines != 0 {
+            let kind = if lines > 0 {
+                ClientMouseKind::ScrollUp
+            } else {
+                ClientMouseKind::ScrollDown
+            };
+            self.mouse(
+                event.position,
+                kind,
+                event.modifiers,
+                lines.unsigned_abs() as u16,
+                window,
+                cx,
+            );
+        }
     }
 
     fn select_all(&mut self, window: &Window, cx: &mut Context<Self>) {
@@ -577,6 +620,7 @@ impl HerdrWindow {
             || self.link_menu_open()
             || self.sidebar_menu.is_some()
             || self.workspace_menu.is_some()
+            || self.tab_menu.is_some()
         {
             return;
         }
@@ -617,6 +661,7 @@ impl HerdrWindow {
             || self.link_menu_open()
             || self.sidebar_menu.is_some()
             || self.workspace_menu.is_some()
+            || self.tab_menu.is_some()
         {
             return;
         }
@@ -996,6 +1041,7 @@ impl Render for HerdrWindow {
         });
         let workspace_menu = self.render_workspace_menu(window, cx);
         let sidebar_menu = self.render_sidebar_menu(window, cx);
+        let tab_menu = self.render_tab_menu(window, cx);
         let link_menu = self.render_link_menu(window, cx);
         let link_tooltip = self.link_tooltip();
         let background = shell_surface::background(
@@ -1069,6 +1115,9 @@ impl Render for HerdrWindow {
                 cx.listener(|view, _: &crate::SplitRight, _, cx| view.split_pane("right", cx)),
             )
             .on_action(cx.listener(|view, _: &crate::SplitDown, _, cx| view.split_pane("down", cx)))
+            .on_action(
+                cx.listener(|view, _: &crate::TogglePaneZoom, _, cx| view.toggle_pane_zoom(cx)),
+            )
             .on_action(cx.listener(|view, _: &crate::ReturnLocal, _, cx| {
                 if view.link_menu_open() || !view.composition.is_empty() {
                     return;
@@ -1086,6 +1135,9 @@ impl Render for HerdrWindow {
             }))
             .on_action(cx.listener(|view, _: &crate::CloseSession, _, cx| view.close_pane(cx)))
             .on_action(cx.listener(|view, _: &crate::CloseTab, _, cx| view.close_tab(cx)))
+            .on_action(cx.listener(|view, _: &crate::CustomizeTab, window, cx| {
+                view.rename_focused_tab(window, cx)
+            }))
             .on_action(cx.listener(
                 |view, _: &gpui_ghostty_terminal::view::SelectAll, window, cx| {
                     view.select_all(window, cx);
@@ -1113,7 +1165,7 @@ impl Render for HerdrWindow {
                 }),
             )
             .child(div().h(px(SHELL_INSET)).flex_none())
-            .child(self.chrome(show_sidebar, sidebar_width, cx))
+            .child(self.chrome(show_sidebar, sidebar_width, window, cx))
             .child(
                 div()
                     .flex_1()
@@ -1193,33 +1245,7 @@ impl Render for HerdrWindow {
                                 ));
                                 terminal
                             })
-                            .on_scroll_wheel(cx.listener(
-                                |view, event: &gpui::ScrollWheelEvent, window, cx| {
-                                    view.cancel_links();
-                                    view.scroll_remainder +=
-                                        f32::from(event.delta.pixel_delta(view.cell.height).y)
-                                            / f32::from(view.cell.height);
-                                    let lines =
-                                        view.scroll_remainder.abs().floor().min(100.0) as u16;
-                                    if lines > 0 {
-                                        let kind = if view.scroll_remainder > 0.0 {
-                                            ClientMouseKind::ScrollUp
-                                        } else {
-                                            ClientMouseKind::ScrollDown
-                                        };
-                                        view.scroll_remainder -=
-                                            view.scroll_remainder.signum() * f32::from(lines);
-                                        view.mouse(
-                                            event.position,
-                                            kind,
-                                            event.modifiers,
-                                            lines,
-                                            window,
-                                            cx,
-                                        );
-                                    }
-                                },
-                            ))
+                            .on_scroll_wheel(cx.listener(Self::scroll_wheel))
                             .child(
                                 canvas(
                                     |_, _, _| (),
@@ -1262,6 +1288,7 @@ impl Render for HerdrWindow {
             )
             .children(workspace_menu)
             .children(sidebar_menu)
+            .children(tab_menu)
             .children(link_menu)
             .children(link_tooltip)
     }
@@ -1273,6 +1300,60 @@ fn modifier_bits(m: Modifiers) -> u8 {
         | (u8::from(m.alt) << 2)
         | (u8::from(m.platform) << 3)
 }
+struct MouseTarget {
+    target: InputTarget,
+    rect: SurfaceRect,
+    pixel_width: u32,
+    pixel_height: u32,
+    reporting: bool,
+    stepwise: bool,
+}
+
+fn mouse_target(
+    surface: &herdr_protocol::PaneSurfaceFrame,
+    col: u16,
+    row: u16,
+) -> Option<MouseTarget> {
+    if let Some(popup) = &surface.popup {
+        let rect = herdr_render::popup_rect(surface)
+            .filter(|rect| herdr_render::contains(*rect, col, row))?;
+        Some(MouseTarget {
+            target: InputTarget::Popup(popup.terminal_id.clone()),
+            rect,
+            pixel_width: popup.pixel_width,
+            pixel_height: popup.pixel_height,
+            reporting: popup.mouse_reporting,
+            stepwise: popup.mouse_reporting,
+        })
+    } else {
+        let pane = surface
+            .panes
+            .iter()
+            .find(|pane| herdr_render::contains(pane.inner_rect, col, row))?;
+        Some(MouseTarget {
+            target: InputTarget::Pane(pane.pane_id.clone()),
+            rect: pane.inner_rect,
+            pixel_width: pane.pixel_width,
+            pixel_height: pane.pixel_height,
+            reporting: pane.mouse_reporting,
+            stepwise: pane.mouse_reporting || pane.alternate_screen_active,
+        })
+    }
+}
+
+fn wheel_events(mut event: ClientPaneInputEvent, stepwise: bool) -> Vec<ClientPaneInputEvent> {
+    // Scrollback consumes the row count. Mouse reports and alternate-screen key
+    // translation consume one step per event, so batch those steps in one message.
+    let count = if stepwise && let ClientPaneInputEvent::Mouse { lines, .. } = &mut event {
+        let count = usize::from(*lines);
+        *lines = 1;
+        count
+    } else {
+        1
+    };
+    vec![event; count]
+}
+
 fn mouse_button(button: MouseButton) -> Option<ClientMouseButton> {
     match button {
         MouseButton::Left => Some(ClientMouseButton::Left),
@@ -1533,6 +1614,118 @@ mod tests {
             keystroke: gpui::Keystroke::parse(key).unwrap(),
             is_held: held,
             prefer_character_input: false,
+        }
+    }
+
+    fn wheel_surface() -> herdr_protocol::PaneSurfaceFrame {
+        use herdr_protocol::{FrameData, PaneSurfaceFrame, PaneSurfacePane};
+        let pane = |id: &str, x, focused| {
+            let rect = SurfaceRect {
+                x,
+                y: 0,
+                width: 40,
+                height: 24,
+            };
+            PaneSurfacePane {
+                pane_id: id.into(),
+                content_revision: 1,
+                rect,
+                inner_rect: rect,
+                scrollbar_rect: None,
+                scroll: None,
+                focused,
+                mouse_reporting: false,
+                sgr_pixel_mouse: false,
+                alternate_screen_active: false,
+                pixel_width: 400,
+                pixel_height: 480,
+            }
+        };
+        PaneSurfaceFrame {
+            boot_id: "test".into(),
+            projection_revision: 1,
+            surface_revision: 1,
+            frame: FrameData {
+                width: 80,
+                height: 24,
+                cells: vec![],
+                cursor: None,
+                hyperlinks: vec![],
+                graphics: vec![],
+            },
+            panes: vec![pane("left", 0, true), pane("right", 40, false)],
+            splits: vec![],
+            popup: None,
+            graphics: Default::default(),
+        }
+    }
+
+    #[test]
+    fn wheel_hit_target_uses_pointer_and_application_mode() {
+        let mut surface = wheel_surface();
+        let hit = mouse_target(&surface, 50, 2).unwrap();
+        assert_eq!(hit.target, InputTarget::Pane("right".into()));
+        assert!(!hit.stepwise);
+        surface.panes[1].alternate_screen_active = true;
+        assert!(mouse_target(&surface, 50, 2).unwrap().stepwise);
+        surface.panes[1].alternate_screen_active = false;
+        surface.panes[1].mouse_reporting = true;
+        assert!(mouse_target(&surface, 50, 2).unwrap().stepwise);
+        assert!(mouse_target(&surface, 80, 2).is_none());
+        assert!(mouse_target(&surface, 20, 24).is_none());
+    }
+
+    #[test]
+    fn wheel_popup_blocks_panes_and_uses_its_own_reporting_mode() {
+        let mut surface = wheel_surface();
+        surface.popup = Some(Box::new(herdr_protocol::ClientShellPopupSurface {
+            terminal_id: "popup".into(),
+            title: "Test".into(),
+            width: None,
+            height: None,
+            frame: herdr_protocol::FrameData {
+                width: 20,
+                height: 10,
+                cells: vec![],
+                cursor: None,
+                hyperlinks: vec![],
+                graphics: vec![],
+            },
+            mouse_reporting: true,
+            sgr_pixel_mouse: false,
+            pixel_width: 200,
+            pixel_height: 200,
+        }));
+        let rect = herdr_render::popup_rect(&surface).unwrap();
+        let hit = mouse_target(&surface, rect.x, rect.y).unwrap();
+        assert_eq!(hit.target, InputTarget::Popup("popup".into()));
+        assert!(hit.stepwise);
+        assert!(mouse_target(&surface, 0, 0).is_none());
+    }
+
+    #[test]
+    fn wheel_batches_preserve_fast_and_slow_steps_in_both_directions() {
+        for kind in [ClientMouseKind::ScrollUp, ClientMouseKind::ScrollDown] {
+            for count in [1, 8, 24, 240] {
+                let event = ClientPaneInputEvent::Mouse {
+                    kind,
+                    position: ClientMousePosition::Cell { column: 3, row: 4 },
+                    geometry: None,
+                    modifiers: 2,
+                    lines: count,
+                };
+                assert_eq!(wheel_events(event.clone(), false), vec![event.clone()]);
+                let events = wheel_events(event, true);
+                assert_eq!(events.len(), usize::from(count));
+                assert!(events.iter().all(|event| *event
+                    == ClientPaneInputEvent::Mouse {
+                        kind,
+                        position: ClientMousePosition::Cell { column: 3, row: 4 },
+                        geometry: None,
+                        modifiers: 2,
+                        lines: 1,
+                    }));
+            }
         }
     }
 

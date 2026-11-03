@@ -63,6 +63,7 @@ actions!(
         PreviousPane,
         NextAgent,
         PreviousAgent,
+        TogglePaneZoom,
         ToggleZen,
         ResumeFollow,
         ReturnLocal,
@@ -592,6 +593,24 @@ impl TerminalApp {
             let id = tab.cycle_focus(forward);
             self.focus_pane(id, window, cx);
         }
+    }
+
+    fn toggle_pane_zoom(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.prepare_terminal_action(cx) {
+            return;
+        }
+        let Some(tab) = self.tabs.get_mut(self.active) else {
+            return;
+        };
+        if !tab.toggle_zoom() {
+            return;
+        }
+        self.dragging = None;
+        self.split_bounds.clear();
+        if let Some(session) = self.active_session() {
+            session.focus(window, cx);
+        }
+        cx.notify();
     }
 
     fn restart(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1133,6 +1152,13 @@ impl TerminalApp {
             let tab_id = tab.id;
             let label = self.tab_label(tab);
             let panes = tab.pane_count();
+            let icon_name = self
+                .follow_controller
+                .tab_icon(tab)
+                .unwrap_or("terminal-window");
+            let zoom_tip = tab
+                .zoomed
+                .then(|| self.t("Pane maximized · ⌘⇧↵ to restore"));
             list = list.child(
                 window_chrome::sidebar_row(("session", tab_id), selected, true, p)
                     .on_click(
@@ -1149,12 +1175,20 @@ impl TerminalApp {
                             cx.notify();
                         }),
                     )
-                    .when_some(self.follow_controller.tab_icon(tab), |row, name| {
-                        row.child(icon(name).size(px(14.0)).text_color(rgb(if selected {
-                            p.accent
+                    .child({
+                        let frame = ui::tab_icon_frame(
+                            ("tab-icon", tab_id),
+                            icon_name,
+                            14.0,
+                            tab.zoomed,
+                            rgb(if selected { p.accent } else { p.muted }),
+                            rgb(p.text),
+                        );
+                        if let Some(tip) = zoom_tip {
+                            frame.tooltip(move |_, cx| cx.new(|_| ui::Tooltip(tip, p)).into())
                         } else {
-                            p.muted
-                        })))
+                            frame
+                        }
                     })
                     .child(window_chrome::sidebar_label(selected, true, p).child(label))
                     .when(panes > 1, |e| {
@@ -1606,10 +1640,13 @@ impl Render for TerminalApp {
                 ),
             )
         });
-        let content = self
-            .tabs
-            .get(self.active)
-            .map(|t| self.pane_tree(&t.layout, t.pane_count() > 1, divider_clip, cx));
+        let content = self.tabs.get(self.active).map(|tab| {
+            if tab.zoomed {
+                self.pane(tab.active_pane, false, cx)
+            } else {
+                self.pane_tree(&tab.layout, tab.pane_count() > 1, divider_clip, cx)
+            }
+        });
         div()
             .track_focus(&self.root_focus)
             .tab_group()
@@ -1683,6 +1720,9 @@ impl Render for TerminalApp {
             )
             .on_action(cx.listener(|root, _: &OpenHerdrWindow, window, cx| {
                 root.open_herdr_window(window, cx)
+            }))
+            .on_action(cx.listener(|root, _: &TogglePaneZoom, window, cx| {
+                root.toggle_pane_zoom(window, cx);
             }))
             .on_action(cx.listener(|root, _: &ToggleZen, window, cx| {
                 if root.prepare_terminal_action(cx) {
@@ -1950,6 +1990,7 @@ fn set_menus(language: locale::Language, cx: &mut App) {
                 MenuItem::action(t("Split Down"), SplitDown),
                 MenuItem::action(t("Next Pane"), NextPane),
                 MenuItem::action(t("Previous Pane"), PreviousPane),
+                MenuItem::action(t("Maximize / Restore Pane"), TogglePaneZoom),
                 MenuItem::action(t("Next Tab"), NextSession),
                 MenuItem::action(t("Previous Tab"), PreviousSession),
                 MenuItem::action(t("Next Agent"), NextAgent),
@@ -2031,6 +2072,7 @@ fn main() {
                 KeyBinding::new("cmd-shift-[", PreviousAgent, Some("HerdrTerminal")),
                 KeyBinding::new("cmd-alt-right", NextPane, None),
                 KeyBinding::new("cmd-alt-left", PreviousPane, None),
+                KeyBinding::new("cmd-shift-enter", TogglePaneZoom, None),
                 KeyBinding::new("cmd-shift-z", ToggleZen, None),
                 KeyBinding::new("cmd-c", Copy, Some("Terminal")),
                 KeyBinding::new("cmd-v", Paste, Some("Terminal")),

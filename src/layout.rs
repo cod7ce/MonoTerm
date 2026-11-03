@@ -249,6 +249,8 @@ pub struct Tab {
     pub id: usize,
     pub layout: Layout,
     pub active_pane: usize,
+    /// Show only the active pane while retaining the full layout.
+    pub zoomed: bool,
     pub appearance: TabAppearance,
 }
 
@@ -258,6 +260,7 @@ impl Tab {
             id,
             layout: Layout::new(pane_id),
             active_pane: pane_id,
+            zoomed: false,
             appearance: TabAppearance::default(),
         }
     }
@@ -270,10 +273,20 @@ impl Tab {
         self.layout.pane_count()
     }
 
+    /// Toggle display of just the active pane without changing the split tree.
+    pub fn toggle_zoom(&mut self) -> bool {
+        if self.pane_count() <= 1 {
+            return false;
+        }
+        self.zoomed = !self.zoomed;
+        true
+    }
+
     /// Split the active pane and focus the new pane on success.
     pub fn split(&mut self, new_id: usize, split_id: usize, axis: Axis) -> bool {
         if self.layout.split(self.active_pane, new_id, split_id, axis) {
             self.active_pane = new_id;
+            self.zoomed = false;
             true
         } else {
             false
@@ -288,9 +301,11 @@ impl Tab {
         } else {
             self.active_pane
         };
+        let layout = self.layout.remove(target)?;
         Some(Self {
             id: self.id,
-            layout: self.layout.remove(target)?,
+            zoomed: self.zoomed && self.active_pane != target && layout.pane_count() > 1,
+            layout,
             active_pane,
             appearance: self.appearance,
         })
@@ -437,6 +452,65 @@ mod tests {
         let original = tab.clone();
         assert!(!tab.split(4, 30, Horizontal));
         assert_eq!(tab, original);
+    }
+
+    #[test]
+    fn zoom_preserves_nested_splits_ratios_and_follows_pane_focus() {
+        let mut tab = Tab::new(7, 1);
+        assert!(!tab.toggle_zoom());
+        assert!(!tab.zoomed);
+        assert!(tab.split(2, 10, Horizontal));
+        assert!(tab.split(3, 20, Vertical));
+        assert!(tab.layout.set_ratio(10, 0.3));
+        assert!(tab.layout.set_ratio(20, 0.65));
+        let layout = tab.layout.clone();
+
+        assert!(tab.toggle_zoom());
+        assert!(tab.zoomed);
+        assert_eq!(tab.active_pane, 3);
+        assert_eq!(tab.cycle_focus(true), 1);
+        assert!(tab.zoomed);
+        assert_eq!(tab.layout, layout);
+        assert!(tab.toggle_zoom());
+        assert!(!tab.zoomed);
+        assert_eq!(tab.active_pane, 1);
+        assert_eq!(tab.layout, layout);
+    }
+
+    #[test]
+    fn splitting_a_zoomed_tab_restores_splits_only_on_success() {
+        let mut tab = Tab::new(7, 1);
+        assert!(tab.split(2, 10, Horizontal));
+        assert!(tab.toggle_zoom());
+        let original = tab.clone();
+        assert!(!tab.split(1, 20, Vertical));
+        assert_eq!(tab, original);
+        assert!(tab.split(3, 20, Vertical));
+        assert!(!tab.zoomed);
+        assert_eq!(tab.active_pane, 3);
+        assert_eq!(tab.pane_ids(), [1, 2, 3]);
+    }
+
+    #[test]
+    fn closing_panes_keeps_zoom_only_when_its_target_and_siblings_survive() {
+        let mut tab = Tab::new(7, 1);
+        assert!(tab.split(2, 10, Horizontal));
+        assert!(tab.split(3, 20, Vertical));
+        assert!(tab.toggle_zoom());
+        assert_eq!(tab.clone().close(99), Some(tab.clone()));
+
+        let remaining = tab.clone().close_active().expect("sibling panes remain");
+        assert!(!remaining.zoomed);
+        assert_eq!(remaining.active_pane, 2);
+        assert_eq!(remaining.pane_ids(), [1, 2]);
+
+        let remaining = tab.close(1).expect("zoomed pane remains");
+        assert!(remaining.zoomed);
+        assert_eq!(remaining.active_pane, 3);
+        let mut last = remaining.close(2).expect("final pane remains");
+        assert!(!last.zoomed);
+        assert_eq!(last.pane_ids(), [3]);
+        assert!(!last.toggle_zoom());
     }
 
     #[test]

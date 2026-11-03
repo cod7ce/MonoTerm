@@ -151,6 +151,36 @@ fn workspace_close_members(
     members
 }
 
+#[derive(Clone)]
+pub struct TabTarget {
+    pub boot_id: String,
+    pub tab: herdr_protocol::ClientShellTab,
+}
+
+impl TabTarget {
+    pub fn new(snapshot: &ClientShellSnapshot, tab: &herdr_protocol::ClientShellTab) -> Self {
+        Self {
+            boot_id: snapshot.boot_id.clone(),
+            tab: tab.clone(),
+        }
+    }
+
+    pub fn validate(&self, snapshot: &ClientShellSnapshot) -> Result<(), String> {
+        if snapshot.boot_id != self.boot_id
+            || !snapshot
+                .workspaces
+                .iter()
+                .any(|workspace| workspace.workspace_id == self.tab.workspace_id)
+            || !snapshot.tabs.iter().any(|tab| {
+                tab.tab_id == self.tab.tab_id && tab.workspace_id == self.tab.workspace_id
+            })
+        {
+            return Err("Herdr tab destination changed; reopen its menu".into());
+        }
+        Ok(())
+    }
+}
+
 pub enum WorkspaceAction<'a> {
     NewTab,
     Rename(&'a str),
@@ -160,7 +190,9 @@ pub enum WorkspaceAction<'a> {
 enum ShellMutation<'a> {
     CreateTab,
     CloseTab(&'a str),
+    RenameTab(&'a TabTarget, &'a str),
     SplitPane(&'a str, &'a str),
+    ZoomPane(&'a str, bool),
     ClosePane(&'a str),
     CreateWorkspace,
     Workspace(&'a WorkspaceTarget, WorkspaceAction<'a>),
@@ -246,6 +278,26 @@ impl ShellMutation<'_> {
                 }
                 Ok((Method::TabClose, json!({"tab_id": tab.tab_id})))
             }
+            Self::RenameTab(target, label) => {
+                target.validate(snapshot)?;
+                let label = label.trim();
+                if label.is_empty() {
+                    return Err("Tab name cannot be empty".into());
+                }
+                Ok((
+                    Method::TabRename,
+                    json!({"tab_id": target.tab.tab_id, "label": label}),
+                ))
+            }
+            Self::ZoomPane(id, zoomed) => {
+                if pane_zoom_mode(snapshot, id)? != Some(*zoomed) {
+                    return Err("Herdr pane destination changed".into());
+                }
+                Ok((
+                    Method::PaneZoom,
+                    json!({"pane_id": id, "mode": if *zoomed { "on" } else { "off" }}),
+                ))
+            }
             Self::SplitPane(id, _) | Self::ClosePane(id) => {
                 let pane = snapshot
                     .panes
@@ -278,6 +330,40 @@ impl ShellMutation<'_> {
             }
         }
     }
+}
+
+/// Only the daemon's snapshot contains every pane while its surface is zoomed.
+/// A single unzoomed pane has nothing to maximize, but a zoomed tab can restore
+/// even if another client closed its other panes in the meantime.
+fn pane_zoom_mode(snapshot: &ClientShellSnapshot, id: &str) -> Result<Option<bool>, String> {
+    let pane = snapshot
+        .panes
+        .iter()
+        .find(|pane| pane.pane_id == id)
+        .ok_or("Herdr pane is no longer present")?;
+    if snapshot.focused_pane_id.as_deref() != Some(id)
+        || snapshot.focused_tab_id.as_deref() != Some(pane.tab_id.as_str())
+        || snapshot.focused_workspace_id.as_deref() != Some(pane.workspace_id.as_str())
+        || !snapshot
+            .workspaces
+            .iter()
+            .any(|workspace| workspace.workspace_id == pane.workspace_id)
+    {
+        return Err("Herdr pane destination changed".into());
+    }
+    let tab = snapshot
+        .tabs
+        .iter()
+        .find(|tab| tab.tab_id == pane.tab_id && tab.workspace_id == pane.workspace_id)
+        .ok_or("Herdr pane destination changed")?;
+    let multiple = snapshot
+        .panes
+        .iter()
+        .filter(|other| other.tab_id == pane.tab_id && other.workspace_id == pane.workspace_id)
+        .take(2)
+        .count()
+        > 1;
+    Ok((tab.zoomed || multiple).then_some(!tab.zoomed))
 }
 
 struct Fence {
@@ -508,28 +594,7 @@ impl HerdrConnection {
     }
 
     fn projected_token(&self) -> Option<InputToken> {
-        if !self.desired_active
-            || !self.acknowledged_active
-            || !self.desired_focus
-            || self.sent_focus != Some(true)
-            || self.sent_geometry != Some(self.geometry)
-            || self.needs_barrier
-            || self.fence.is_some()
-        {
-            return None;
-        }
-        let snapshot = self.snapshot.as_ref()?;
-        let surface = self.surface.as_ref()?;
-        if self.boot_id.as_deref() != Some(snapshot.boot_id.as_str())
-            || surface.boot_id != snapshot.boot_id
-            || surface.projection_revision != snapshot.revision
-            || !self.geometry_matches(surface)
-            || self
-                .minimum_projection
-                .is_none_or(|revision| snapshot.revision < revision)
-        {
-            return None;
-        }
+        let (snapshot, surface) = self.current_projection()?;
         let target = if let Some(popup) = &surface.popup {
             if popup.terminal_id.is_empty() {
                 return None;
@@ -555,6 +620,88 @@ impl HerdrConnection {
             projection_revision: snapshot.revision,
             target,
         })
+    }
+
+    /// The projection and surface that input may currently be sent against.
+    /// Callers also check focus and geometry for keyboard input; pointer input
+    /// may target any pane drawn in this surface.
+    fn current_projection(&self) -> Option<(&ClientShellSnapshot, &PaneSurfaceFrame)> {
+        if !self.desired_active
+            || !self.acknowledged_active
+            || !self.desired_focus
+            || self.sent_focus != Some(true)
+            || self.sent_geometry != Some(self.geometry)
+            || self.needs_barrier
+            || self.fence.is_some()
+        {
+            return None;
+        }
+        let snapshot = self.snapshot.as_ref()?;
+        let surface = self.surface.as_ref()?;
+        if self.boot_id.as_deref() != Some(snapshot.boot_id.as_str())
+            || surface.boot_id != snapshot.boot_id
+            || surface.projection_revision != snapshot.revision
+            || !self.geometry_matches(surface)
+            || self
+                .minimum_projection
+                .is_none_or(|revision| snapshot.revision < revision)
+        {
+            return None;
+        }
+        Some((snapshot, surface))
+    }
+
+    /// A pointer destination drawn in the current surface, which need not be
+    /// the daemon's focused pane. Focus changes, popups, navigation and new
+    /// projections invalidate the token before its input is queued.
+    pub fn visible_input_token(&self, target: &InputTarget) -> Option<InputToken> {
+        let (snapshot, surface) = self.current_projection()?;
+        match target {
+            InputTarget::Pane(pane_id) => {
+                if surface.popup.is_some()
+                    || !snapshot.panes.iter().any(|pane| &pane.pane_id == pane_id)
+                    || !surface.panes.iter().any(|pane| &pane.pane_id == pane_id)
+                {
+                    return None;
+                }
+            }
+            InputTarget::Popup(terminal_id) => {
+                if !surface
+                    .popup
+                    .as_ref()
+                    .is_some_and(|popup| &popup.terminal_id == terminal_id)
+                {
+                    return None;
+                }
+            }
+        }
+        Some(InputToken {
+            epoch: self.epoch,
+            boot_id: snapshot.boot_id.clone(),
+            projection_revision: snapshot.revision,
+            target: target.clone(),
+        })
+    }
+
+    /// Send pointer input to a pane or popup drawn in the visible surface.
+    /// This never focuses the destination and never retargets input after the
+    /// projection changes.
+    pub fn send_input_to_visible(
+        &mut self,
+        target: &InputTarget,
+        events: impl IntoIterator<Item = ClientPaneInputEvent>,
+    ) -> Result<(), String> {
+        let token = self
+            .visible_input_token(target)
+            .ok_or_else(|| "Herdr input is not ready".to_string())?;
+        self.poll();
+        if !self.connected()
+            || !self.events_drained()
+            || self.visible_input_token(&token.target).as_ref() != Some(&token)
+        {
+            return Err("Herdr input destination changed or is not ready".into());
+        }
+        self.queue_input(&token, events)
     }
 
     pub fn composition_token(&self) -> Option<CompositionToken> {
@@ -681,12 +828,26 @@ impl HerdrConnection {
         self.mutate_shell(ShellMutation::CloseTab(tab_id))
     }
 
+    pub fn rename_tab(&mut self, target: &TabTarget, label: &str) -> Result<(), String> {
+        self.mutate_shell(ShellMutation::RenameTab(target, label))
+    }
+
     pub fn split_pane(&mut self, pane_id: &str, direction: &str) -> Result<(), String> {
         self.mutate_shell(ShellMutation::SplitPane(pane_id, direction))
     }
 
     pub fn close_pane(&mut self, pane_id: &str) -> Result<(), String> {
         self.mutate_shell(ShellMutation::ClosePane(pane_id))
+    }
+
+    /// Preserve the daemon's split tree and request the opposite of the captured
+    /// zoom state explicitly, so another client's toggle cannot invert our intent.
+    pub fn toggle_pane_zoom(&mut self, pane_id: &str) -> Result<(), String> {
+        let snapshot = self.snapshot.as_ref().ok_or("Herdr has no snapshot")?;
+        let Some(zoomed) = pane_zoom_mode(snapshot, pane_id)? else {
+            return Ok(());
+        };
+        self.mutate_shell(ShellMutation::ZoomPane(pane_id, zoomed))
     }
 
     /// Create and focus a workspace, inheriting the captured source workspace's
@@ -838,7 +999,10 @@ impl HerdrConnection {
         let status = match mutation {
             ShellMutation::CreateTab => "Creating tab",
             ShellMutation::CloseTab(_) => "Closing tab",
+            ShellMutation::RenameTab(..) => "Renaming tab",
             ShellMutation::SplitPane(..) => "Splitting pane",
+            ShellMutation::ZoomPane(_, true) => "Maximizing pane",
+            ShellMutation::ZoomPane(_, false) => "Restoring pane",
             ShellMutation::ClosePane(_) => "Closing pane",
             ShellMutation::CreateWorkspace => "Creating workspace",
             ShellMutation::Workspace(_, WorkspaceAction::NewTab) => "Creating tab",
@@ -1566,6 +1730,55 @@ mod tests {
     }
 
     #[test]
+    fn tab_rename_keeps_the_clicked_identity_and_rejects_stale_destinations() {
+        let mut snapshot = (*snapshot()).clone();
+        let target = TabTarget::new(&snapshot, &snapshot.tabs[0]);
+        snapshot.focused_tab_id = Some("another-tab".into());
+        snapshot.tabs[0].label = "updated automatic title".into();
+        assert_eq!(
+            ShellMutation::RenameTab(&target, "  中文 Tab  ")
+                .request(&snapshot)
+                .expect("valid tab rename"),
+            (
+                Method::TabRename,
+                json!({"tab_id": target.tab.tab_id, "label": "中文 Tab"})
+            )
+        );
+        assert!(
+            ShellMutation::RenameTab(&target, " \u{3000} ")
+                .request(&snapshot)
+                .is_err()
+        );
+        let mut changed = snapshot.clone();
+        changed.boot_id.push_str("-restarted");
+        assert!(
+            ShellMutation::RenameTab(&target, "title")
+                .request(&changed)
+                .is_err()
+        );
+        changed = snapshot.clone();
+        changed.tabs[0].workspace_id = "other-space".into();
+        assert!(
+            ShellMutation::RenameTab(&target, "title")
+                .request(&changed)
+                .is_err()
+        );
+        changed = snapshot.clone();
+        changed.tabs.clear();
+        assert!(
+            ShellMutation::RenameTab(&target, "title")
+                .request(&changed)
+                .is_err()
+        );
+        snapshot.workspaces.clear();
+        assert!(
+            ShellMutation::RenameTab(&target, "title")
+                .request(&snapshot)
+                .is_err()
+        );
+    }
+
+    #[test]
     fn pane_mutations_capture_the_focused_pane_and_reject_stale_destinations() {
         let mut snapshot = (*snapshot()).clone();
         assert_eq!(
@@ -1604,6 +1817,207 @@ mod tests {
                 .request(&snapshot)
                 .is_err()
         );
+    }
+
+    fn split_snapshot(zoomed: bool) -> ClientShellSnapshot {
+        let mut snapshot = (*snapshot()).clone();
+        let mut second = snapshot.panes[0].clone();
+        second.pane_id = "w1:p2".into();
+        second.focused = false;
+        snapshot.panes.push(second);
+        snapshot.tabs[0].zoomed = zoomed;
+        snapshot
+    }
+
+    #[test]
+    fn pane_zoom_uses_snapshot_pane_count_and_explicit_modes() {
+        let mut owner = ready();
+        let token = owner.projected_token();
+        let display = owner.display_surface.clone();
+        assert_eq!(owner.toggle_pane_zoom("w1:p1"), Ok(()));
+        assert_eq!(owner.projected_token(), token);
+        assert_eq!(owner.display_surface, display);
+        assert!(owner.fence.is_none());
+
+        let mut snapshot = split_snapshot(false);
+        assert_eq!(pane_zoom_mode(&snapshot, "w1:p1"), Ok(Some(true)));
+        assert_eq!(
+            ShellMutation::ZoomPane("w1:p1", true)
+                .request(&snapshot)
+                .unwrap(),
+            (Method::PaneZoom, json!({"pane_id": "w1:p1", "mode": "on"}))
+        );
+        // Panes in other tabs or workspaces cannot enable zoom in this tab.
+        snapshot.panes[1].tab_id = "w1:t2".into();
+        assert_eq!(pane_zoom_mode(&snapshot, "w1:p1"), Ok(None));
+        snapshot.panes[1].tab_id = "w1:t1".into();
+        snapshot.panes[1].workspace_id = "w2".into();
+        assert_eq!(pane_zoom_mode(&snapshot, "w1:p1"), Ok(None));
+        snapshot.panes.pop();
+        snapshot.tabs[0].zoomed = true;
+        assert_eq!(pane_zoom_mode(&snapshot, "w1:p1"), Ok(Some(false)));
+        assert_eq!(
+            ShellMutation::ZoomPane("w1:p1", false)
+                .request(&snapshot)
+                .unwrap(),
+            (Method::PaneZoom, json!({"pane_id": "w1:p1", "mode": "off"}))
+        );
+        assert!(
+            ShellMutation::ZoomPane("w1:p1", true)
+                .request(&snapshot)
+                .is_err()
+        );
+
+        for change in 0..6 {
+            let mut stale = split_snapshot(false);
+            match change {
+                0 => stale.focused_pane_id = Some("w1:p2".into()),
+                1 => stale.focused_tab_id = Some("w1:t2".into()),
+                2 => stale.focused_workspace_id = Some("w2".into()),
+                3 => stale.workspaces.clear(),
+                4 => stale.tabs[0].workspace_id = "w2".into(),
+                _ => stale.panes.clear(),
+            }
+            assert!(
+                ShellMutation::ZoomPane("w1:p1", true)
+                    .request(&stale)
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn pane_zoom_rejects_snapshots_changed_while_draining_events() {
+        for change in 0..3 {
+            let mut owner = ready();
+            owner.accept(
+                ClientEvent::Snapshot(Arc::new(split_snapshot(false))),
+                Instant::now(),
+            );
+            let captured = owner.snapshot.clone().unwrap();
+            let epoch = owner.epoch;
+            assert_eq!(
+                ShellMutation::ZoomPane("w1:p1", true)
+                    .request(&captured)
+                    .unwrap()
+                    .0,
+                Method::PaneZoom
+            );
+            let mut next = (*captured).clone();
+            next.revision += 1;
+            match change {
+                0 => next.tabs[0].zoomed = true,
+                1 => next.focused_pane_id = Some("w1:p2".into()),
+                _ => next.boot_id.push_str("-restarted"),
+            }
+            owner.accept(ClientEvent::Snapshot(Arc::new(next)), Instant::now());
+            assert!(owner.validate_mutation_snapshot(&captured, epoch).is_err());
+            assert!(owner.projected_token().is_none());
+            assert!(owner.fence.is_none(), "stale zoom must never be queued");
+        }
+    }
+
+    #[test]
+    fn pane_zoom_and_restore_wait_for_acknowledged_surfaces() {
+        for zoomed in [false, true] {
+            let mut owner = ready();
+            let initial = split_snapshot(zoomed);
+            owner.accept(
+                ClientEvent::Snapshot(Arc::new(initial.clone())),
+                Instant::now(),
+            );
+            let previous = owner.display_surface.clone().unwrap();
+            let old_token = owner.projected_token().unwrap();
+            let composition = owner.composition_identity(&old_token);
+            assert_eq!(
+                ShellMutation::ZoomPane("w1:p1", !zoomed)
+                    .request(&initial)
+                    .unwrap(),
+                (
+                    Method::PaneZoom,
+                    json!({"pane_id": "w1:p1", "mode": if zoomed { "off" } else { "on" }})
+                )
+            );
+            owner.begin_focus_change("zoom-1".into(), "activate-1".into(), None, "Changing zoom");
+            assert!(owner.projected_token().is_none());
+            assert!(!owner.composition_destination_matches(&composition));
+            assert!(Arc::ptr_eq(
+                owner.display_surface.as_ref().unwrap(),
+                &previous
+            ));
+            let mut next = initial.clone();
+            next.revision += 1;
+            next.tabs[0].zoomed = !zoomed;
+            owner
+                .acknowledge("activate-1", &activation(next.revision))
+                .unwrap();
+            owner.accept(ClientEvent::Surface(previous.clone()), Instant::now());
+            assert!(!owner.finish_fence());
+            owner.accept(
+                ClientEvent::Snapshot(Arc::new(next.clone())),
+                Instant::now(),
+            );
+            owner.accept(ClientEvent::Surface(previous), Instant::now());
+            assert!(owner.surface.is_none(), "the previous layout is stale");
+            let current = surface(&next, 2);
+            let mut stale_boot = (*current).clone();
+            stale_boot.boot_id.push_str("-old");
+            owner.accept(ClientEvent::Surface(Arc::new(stale_boot)), Instant::now());
+            assert!(owner.surface.is_none(), "another daemon's layout is stale");
+            owner.accept(ClientEvent::Surface(current), Instant::now());
+            assert!(!owner.finish_fence(), "the zoom response is still pending");
+            assert!(owner.projected_token().is_none());
+            owner
+                .acknowledge("zoom-1", &json!({"id": "zoom-1", "result": {}}))
+                .unwrap();
+            assert!(owner.finish_fence());
+            let token = owner.projected_token().unwrap();
+            assert_eq!(token.target(), old_token.target());
+            assert_ne!(token, old_token);
+            assert!(!owner.composition_destination_matches(&composition));
+            let restored = owner.snapshot.as_ref().unwrap();
+            assert_eq!(
+                restored.panes, initial.panes,
+                "zoom preserves pane identities"
+            );
+            assert_eq!(restored.focused_tab_id, initial.focused_tab_id);
+            assert_eq!(restored.focused_pane_id, initial.focused_pane_id);
+            assert_eq!(restored.tabs[0].zoomed, !zoomed);
+        }
+    }
+
+    #[test]
+    fn unavailable_or_rejected_zoom_does_not_restore_old_input() {
+        for zoomed in [false, true] {
+            let mut owner = ready();
+            owner.accept(
+                ClientEvent::Snapshot(Arc::new(split_snapshot(zoomed))),
+                Instant::now(),
+            );
+            let token = owner.projected_token().unwrap();
+            let display = owner.display_surface.clone();
+            assert!(
+                owner.toggle_pane_zoom("w1:p1").is_err(),
+                "no transport is available"
+            );
+            assert_eq!(owner.projected_token(), Some(token));
+            assert_eq!(owner.display_surface, display);
+            assert!(owner.fence.is_none());
+            owner.begin_focus_change("zoom-1".into(), "activate-1".into(), None, "Changing zoom");
+            owner.accept(
+                ClientEvent::Response {
+                    request_id: "zoom-1".into(),
+                    response: json!({"id": "zoom-1", "error": {"code": "not_found"}}),
+                },
+                Instant::now(),
+            );
+            assert!(owner.projected_token().is_none());
+            assert!(owner.fence.is_none());
+            assert!(owner.snapshot.is_none());
+            assert!(owner.surface.is_none());
+            assert!(owner.display_surface.is_none());
+            assert!(owner.needs_barrier);
+        }
     }
 
     #[test]
@@ -1738,9 +2152,15 @@ mod tests {
 
     #[test]
     fn mutations_reject_snapshots_changed_while_draining_events() {
+        let initial = snapshot();
+        let tab = TabTarget::new(&initial, &initial.tabs[0]);
         for (mutation, method) in [
             (ShellMutation::CreateTab, Method::TabCreate),
             (ShellMutation::CloseTab("w1:t1"), Method::TabClose),
+            (
+                ShellMutation::RenameTab(&tab, "new title"),
+                Method::TabRename,
+            ),
             (
                 ShellMutation::SplitPane("w1:p1", "right"),
                 Method::PaneSplit,
@@ -1775,9 +2195,12 @@ mod tests {
 
     #[test]
     fn mutation_fence_requires_both_responses_and_a_current_surface() {
+        let initial = snapshot();
+        let tab = TabTarget::new(&initial, &initial.tabs[0]);
         for mutation in [
             ShellMutation::CreateTab,
             ShellMutation::CloseTab("w1:t1"),
+            ShellMutation::RenameTab(&tab, "new title"),
             ShellMutation::SplitPane("w1:p1", "down"),
             ShellMutation::ClosePane("w1:p1"),
             ShellMutation::CreateWorkspace,
@@ -2001,6 +2424,103 @@ mod tests {
             Instant::now(),
         );
         assert_eq!(owner.projected_token(), Some(token));
+    }
+
+    #[test]
+    fn pointer_input_targets_any_visible_pane_without_taking_focus() {
+        let mut owner = ready();
+        let focused = owner
+            .snapshot
+            .as_ref()
+            .unwrap()
+            .focused_pane_id
+            .clone()
+            .unwrap();
+        let mut next = (**owner.snapshot.as_ref().unwrap()).clone();
+        let mut pane = next
+            .panes
+            .iter()
+            .find(|pane| pane.pane_id == focused)
+            .unwrap()
+            .clone();
+        pane.pane_id = "w1:p2".into();
+        pane.focused = false;
+        next.panes.push(pane);
+        owner.snapshot = Some(Arc::new(next));
+
+        let mut frame = (**owner.surface.as_ref().unwrap()).clone();
+        let mut surface_pane = frame.panes[0].clone();
+        surface_pane.pane_id = "w1:p2".into();
+        surface_pane.focused = false;
+        frame.panes.push(surface_pane);
+        owner.surface = Some(Arc::new(frame.clone()));
+        owner.display_surface = Some(Arc::new(frame));
+
+        let target = InputTarget::Pane("w1:p2".into());
+        let pointer = owner.visible_input_token(&target).unwrap();
+        assert_eq!(pointer.target, target);
+        assert_eq!(pointer.boot_id, owner.snapshot.as_ref().unwrap().boot_id);
+        assert_eq!(
+            owner.projected_token().unwrap().target,
+            InputTarget::Pane(focused),
+            "keyboard focus stays on the daemon's focused pane"
+        );
+        assert!(
+            owner
+                .visible_input_token(&InputTarget::Pane("w1:p3".into()))
+                .is_none()
+        );
+
+        let mut next = (**owner.snapshot.as_ref().unwrap()).clone();
+        next.revision += 1;
+        owner.snapshot = Some(Arc::new(next));
+        assert!(
+            owner.visible_input_token(&target).is_none(),
+            "a new projection invalidates a captured pointer destination"
+        );
+    }
+
+    #[test]
+    fn popups_take_pointer_input_away_from_panes() {
+        let mut owner = ready();
+        let mut frame = (**owner.surface.as_ref().unwrap()).clone();
+        let popup_frame = frame.frame.clone();
+        frame.popup = Some(Box::new(ClientShellPopupSurface {
+            terminal_id: "popup-1".into(),
+            title: "Popup".into(),
+            width: None,
+            height: None,
+            frame: popup_frame,
+            mouse_reporting: false,
+            sgr_pixel_mouse: false,
+            pixel_width: 0,
+            pixel_height: 0,
+        }));
+        owner.surface = Some(Arc::new(frame));
+        let focused = owner
+            .snapshot
+            .as_ref()
+            .unwrap()
+            .focused_pane_id
+            .clone()
+            .unwrap();
+        assert!(
+            owner
+                .visible_input_token(&InputTarget::Pane(focused))
+                .is_none()
+        );
+        assert_eq!(
+            owner
+                .visible_input_token(&InputTarget::Popup("popup-1".into()))
+                .unwrap()
+                .target,
+            InputTarget::Popup("popup-1".into())
+        );
+        assert!(
+            owner
+                .visible_input_token(&InputTarget::Popup("popup-2".into()))
+                .is_none()
+        );
     }
 
     #[test]
