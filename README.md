@@ -2,7 +2,7 @@
 
 A native macOS terminal built with Rust, GPUI and Ghostty. Each local pane owns a real PTY; Ghostty handles terminal state and GPUI renders the terminal and application.
 
-**Current version: 0.3.2.** Apple Silicon, macOS 14 or later.
+**当前版本：0.3.3。** 适用于 Apple Silicon Mac，要求 macOS 14 或更高版本。
 
 ## Features
 
@@ -18,6 +18,8 @@ A native macOS terminal built with Rust, GPUI and Ghostty. Each local pane owns 
 - A **Version** settings tab with current version, manual update checks and release downloads. Sparkle verifies signed update packages; automatic checking and background downloads are disabled.
 
 ## Download and updates
+
+在应用菜单中选择 **MonoTerm → 关于 MonoTerm**，可查看应用简介、当前版本、运行平台和构建技术，并打开 GitHub 项目或版本下载页面。版本号直接读取构建元数据，与发布版本保持一致；关于窗口支持中英文界面以及浅色、深色主题。
 
 Download application packages from [Releases](https://github.com/cod7ce/MonoTerm/releases).
 Open **Settings → Version** to check for updates or view release downloads.
@@ -50,7 +52,7 @@ The app bundle contains its runtime resources and framework. Cargo, Zig and the 
 | Action | Shortcut |
 | --- | --- |
 | New tab | Cmd-T |
-| Close active pane | Cmd-W |
+| 关闭当前窗口 | Cmd-W |
 | Close active tab | Cmd-Shift-W |
 | Next / previous tab | Ctrl-Tab / Ctrl-Shift-Tab |
 | Split right / below | Cmd-D / Cmd-Shift-D |
@@ -67,7 +69,7 @@ The app bundle contains its runtime resources and framework. Cargo, Zig and the 
 | Restart active shell | Cmd-Shift-R |
 | Quit | Cmd-Q |
 
-Shared shortcuts apply in main and Herdr windows. Zen, shell restart and custom tab icons are main-window actions. Cmd-Shift-E opens local tab customization or Herdr tab renaming; Herdr tabs also support renaming by double-click or context menu. In Herdr, indexed tabs refer to the current Space; an absent index does nothing. Pane/tab cycling wraps, and agent cycling follows the Agents list's ordering and filter even when the sidebar is hidden. The native Herdr close button detaches; Cmd-W closes its focused daemon pane and Cmd-Shift-W closes its focused daemon tab.
+共享快捷键适用于主窗口和 Herdr 窗口。禅模式、重启 shell 和自定义标签页图标仅适用于主窗口。Cmd-Shift-E 打开本地标签页自定义或 Herdr 标签页重命名；Herdr 标签页也支持双击或右键菜单重命名。Herdr 的数字快捷键选择当前 Space 中的标签页，索引不存在时不执行操作。窗格、标签页和 agent 切换会循环；agent 切换遵循 Agents 列表的顺序和筛选条件，即使侧栏隐藏也一样。关闭按钮和 Cmd-W 均只关闭当前窗口；关闭 Herdr 窗口会解除界面连接，不关闭守护进程中的窗格。Cmd-Shift-W 仍关闭当前标签页；单独关闭窗格可使用窗格关闭按钮或“视图 → 关闭窗格”。
 
 Cmd-Shift-Enter maximizes the active pane within its tab in either window; pressing it again restores the split layout. A single-pane tab is unchanged. A dashed frame around the tab icon identifies this state and shows the restore shortcut on hover. Local zoom keeps the original split tree, ratios and running shells; cycling panes changes the maximized pane, splitting restores the layout, and closing the maximized pane reveals its siblings. Herdr uses the daemon's pane zoom state.
 
@@ -87,7 +89,7 @@ Cmd-hover underlines HTTP/HTTPS links and shows their destination; Cmd-click ope
 
 The Herdr button enables local companion following. Settings → Integrations controls the source socket and whether a separate Herdr window opens automatically. The Herdr window paints the daemon's cell surface; local tabs remain real MonoTerm PTYs.
 
-Main, Herdr and Settings windows close independently. Closing the main window terminates its local shells while Herdr keeps its connection, input, output and preferences. Closing Herdr detaches its surface without stopping daemon-owned terminals or local shells. View → Return to local terminals reopens the main window when needed. Disabling follow affects only local companion following; explicitly opening Herdr does not enable it. Source changes reconnect the existing Herdr window in place. Closing the last native window exits MonoTerm, and Cmd-Q exits the whole application.
+主窗口、Herdr 窗口和设置窗口可以独立关闭。关闭主窗口会终止其中的本地 shell，Herdr 的连接、输入、输出和偏好设置不受影响。关闭 Herdr 窗口只解除界面连接，不会停止守护进程中的终端或本地 shell。“视图 → 返回本地终端”可重新打开主窗口。禁用跟随只影响本地伴随终端；手动打开 Herdr 窗口不会启用跟随。切换连接来源会在现有 Herdr 窗口中重新连接。关闭最后一个窗口后，MonoTerm 继续运行；点击 Dock 图标或选择“新建标签页”可重新打开主窗口。Cmd-Q 或“退出 MonoTerm”才会退出整个应用。
 
 Following respects manual tab selection, verified process identities, idle-shell checks and connection/input fences. Clicking panes or resizing splits does not pin following. Custom tab titles and icons belong to the tab until it closes.
 
@@ -134,6 +136,8 @@ The 0.3.0 release passed 246 application/component tests (one opt-in ignored), s
 The 0.3.1 release passed 265 application/component tests (one opt-in ignored), strict all-target/all-feature Clippy, formatting, updater lifecycle fixtures, and a signed release build with Ed25519 verification. Focused changes cover Herdr tab styling and renaming, pane zoom in both windows, pointer-directed wheel routing, gesture-scaled scrolling, and revealing the selected agent's tab. Native GUI checks for these changes remain unverified because Accessibility and Screen Recording access were unavailable; cross-version update installation and notarization are not claimed.
 
 The 0.3.2 release passed 273 application/component tests (one opt-in ignored), strict all-target/all-feature Clippy, formatting, eight updater lifecycle scenarios, and Ed25519 signature tests. The signed release archive passed ZIP integrity, SHA256, appcast metadata, and extracted-bundle signature verification. This release adds independent pane names in both windows, Herdr split-divider dragging, and window-level local resize handling. Native pane editor and divider interactions remain unverified because Accessibility access was unavailable; full cross-version update installation and notarization are not claimed.
+
+0.3.3 发布前通过了 273 项应用及组件测试（另有 1 项需手动启用的测试未运行）、全目标及全特性的严格 Clippy、格式检查、8 项更新器生命周期检查和 Ed25519 签名自测。独立测试实例通过 33 项原生窗口检查，覆盖关闭按钮、⌘W、⌘Q、窗口重新打开，以及关于页面的单窗口复用、中英文和深浅主题；两种主题的关于页面截图均已检查。尚未验证完整的跨版本下载安装与重启流程，也未进行 Apple 公证。
 
 Native GUI checks require a logged-in, unlocked macOS desktop and Accessibility/Screen Recording access. Use separate test-owned windows and configurations. Never restart an existing user terminal as part of verification. Existing upstream Rust future-compatibility warnings may still appear.
 

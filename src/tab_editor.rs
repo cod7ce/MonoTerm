@@ -31,7 +31,6 @@ pub fn init(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("enter", Save, Some("TabEditor > MonoTermTextInput")),
         KeyBinding::new("escape", Cancel, Some("TabEditor")),
-        KeyBinding::new("cmd-w", Cancel, Some("TabEditor")),
     ]);
 }
 

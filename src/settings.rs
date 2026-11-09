@@ -3,7 +3,7 @@ use crate::typography::{
     DEFAULT_FONT_SIZE, MAX_FONT_SIZE, MIN_FONT_SIZE, Typography, filter_fonts, installed_fonts,
 };
 use crate::{
-    CloseSession, CloseTab, TerminalApp, ToggleSettings,
+    CloseTab, CloseWindow, TerminalApp, ToggleSettings,
     appearance::{Appearance, Palette, Theme},
     locale::Language,
     ui::icon,
@@ -1291,7 +1291,6 @@ impl SettingsWindow {
                 "Tabs & panes · both windows",
                 &[
                     ("New tab", "⌘T"),
-                    ("Close pane", "⌘W"),
                     ("Close tab", "⌘⇧W"),
                     ("Select tab 1–9 by index", "⌘1…⌘9"),
                     ("Next / previous tab", "⌃Tab / ⌃⇧Tab"),
@@ -1325,6 +1324,7 @@ impl SettingsWindow {
             .child(self.shortcut_group(
                 "Application",
                 &[
+                    ("Close Window", "⌘W"),
                     ("Close settings", "Esc / ⌘W / ⌘⇧W"),
                     ("Quit MonoTerm", "⌘Q"),
                 ],
@@ -1731,7 +1731,7 @@ impl Render for SettingsWindow {
                 cx.listener(|settings, _: &CloseSettings, window, cx| settings.close(window, cx)),
             )
             .on_action(
-                cx.listener(|settings, _: &CloseSession, window, cx| settings.close(window, cx)),
+                cx.listener(|settings, _: &CloseWindow, window, cx| settings.close(window, cx)),
             )
             .on_action(cx.listener(|settings, _: &crate::ReturnLocal, _, cx| {
                 TerminalApp::show_main(settings.owner.clone(), cx);

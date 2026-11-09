@@ -1,3 +1,4 @@
+mod about;
 mod appearance;
 mod companion;
 mod follow;
@@ -45,6 +46,8 @@ actions!(
     terminal,
     [
         Quit,
+        OpenAbout,
+        CloseWindow,
         Restart,
         IncreaseFont,
         DecreaseFont,
@@ -80,6 +83,13 @@ struct SelectTab {
 }
 
 use window_chrome::{SHELL_INSET, SHELL_RADIUS, TOOLBAR_CENTER, TOOLBAR_HEIGHT};
+
+struct ApplicationState {
+    terminal: gpui::Entity<TerminalApp>,
+    about_window: Option<gpui::WindowHandle<about::AboutWindow>>,
+}
+
+impl gpui::Global for ApplicationState {}
 
 struct TerminalApp {
     sessions: Vec<Session>,
@@ -1819,6 +1829,10 @@ impl Render for TerminalApp {
             .text_color(rgb(p.text))
             .font_family(".SystemUIFont")
             .on_action(cx.listener(|root, _: &NewSession, window, cx| root.new_session(window, cx)))
+            .on_action(cx.listener(|root, _: &CloseWindow, window, cx| {
+                root.close_main(cx);
+                window.remove_window();
+            }))
             .on_action(cx.listener(|root, _: &CloseSession, window, cx| {
                 if let Some(tab) = root.tabs.get(root.active) {
                     root.close_pane(tab.active_pane, window, cx);
@@ -2101,7 +2115,10 @@ fn set_menus(language: locale::Language, cx: &mut App) {
         Menu {
             name: "MonoTerm".into(),
             items: vec![
+                MenuItem::action(t("About MonoTerm"), OpenAbout),
+                MenuItem::separator(),
                 MenuItem::action(t("New Tab"), NewSession),
+                MenuItem::action(t("Close Window"), CloseWindow),
                 MenuItem::separator(),
                 MenuItem::action(t("Settings"), ToggleSettings),
                 MenuItem::action(t("Quit MonoTerm"), Quit),
@@ -2176,60 +2193,83 @@ fn main() {
             std::process::exit(2);
         }
     };
-    Application::new()
-        .with_assets(ui::Icons)
-        .run(move |cx: &mut App| {
-            if let Err(error) = window_style::set_application_icon() {
-                eprintln!("Set application icon: {error}");
-            }
-            cx.set_quit_mode(QuitMode::LastWindowClosed);
-            cx.on_action(|_: &Quit, cx| cx.quit());
-            text_input::init(cx);
-            tab_editor::init(cx);
-            pane_editor::init(cx);
-            ui::init(cx);
-            cx.bind_keys([
-                KeyBinding::new("cmd-shift-e", CustomizeTab, None),
-                KeyBinding::new("escape", DismissTabMenu, Some("TabMenu")),
-                KeyBinding::new("cmd-q", Quit, None),
-                KeyBinding::new("cmd-w", CloseSession, None),
-                KeyBinding::new("cmd-shift-w", CloseTab, None),
-                KeyBinding::new("cmd-t", NewSession, None),
-                KeyBinding::new("ctrl-tab", NextSession, None),
-                KeyBinding::new("ctrl-shift-tab", PreviousSession, None),
-                KeyBinding::new("cmd-b", ToggleSidebar, None),
-                KeyBinding::new("cmd-,", ToggleSettings, None),
-                KeyBinding::new("escape", settings::CloseSettings, Some("Settings")),
-                KeyBinding::new("cmd-d", SplitRight, None),
-                KeyBinding::new("cmd-shift-d", SplitDown, None),
-                KeyBinding::new("cmd-]", NextPane, None),
-                KeyBinding::new("cmd-[", PreviousPane, None),
-                KeyBinding::new("cmd-shift-]", NextAgent, Some("HerdrTerminal")),
-                KeyBinding::new("cmd-shift-[", PreviousAgent, Some("HerdrTerminal")),
-                KeyBinding::new("cmd-alt-right", NextPane, None),
-                KeyBinding::new("cmd-alt-left", PreviousPane, None),
-                KeyBinding::new("cmd-shift-enter", TogglePaneZoom, None),
-                KeyBinding::new("cmd-shift-z", ToggleZen, None),
-                KeyBinding::new("cmd-c", Copy, Some("Terminal")),
-                KeyBinding::new("cmd-v", Paste, Some("Terminal")),
-                KeyBinding::new("cmd-a", SelectAll, Some("Terminal")),
-                KeyBinding::new("cmd-=", IncreaseFont, None),
-                KeyBinding::new("cmd-+", IncreaseFont, None),
-                KeyBinding::new("cmd--", DecreaseFont, None),
-                KeyBinding::new("cmd-0", ResetFont, None),
-                KeyBinding::new("cmd-shift-r", Restart, None),
-            ]);
-            cx.bind_keys((0..9).map(|index| {
-                KeyBinding::new(&format!("cmd-{}", index + 1), SelectTab { index }, None)
-            }));
-            match cx.open_window(main_window_options(cx), |window, cx| {
-                cx.new(|cx| TerminalApp::new(directory, window, cx))
-            }) {
-                Ok(_) => cx.activate(true),
-                Err(error) => {
-                    eprintln!("Open terminal window: {error}");
-                    cx.quit();
-                }
+    let application = Application::new().with_assets(ui::Icons);
+    application.on_reopen(|cx| {
+        if cx.windows().is_empty()
+            && let Some(state) = cx.try_global::<ApplicationState>()
+        {
+            TerminalApp::show_main(state.terminal.clone(), cx);
+        }
+    });
+    application.run(move |cx: &mut App| {
+        if let Err(error) = window_style::set_application_icon() {
+            eprintln!("Set application icon: {error}");
+        }
+        cx.set_quit_mode(QuitMode::Explicit);
+        cx.on_action(|_: &Quit, cx| cx.quit());
+        cx.on_action(|_: &OpenAbout, cx| cx.defer(about::open));
+        cx.on_action(|_: &NewSession, cx| {
+            if let Some(state) = cx.try_global::<ApplicationState>() {
+                TerminalApp::show_main(state.terminal.clone(), cx);
             }
         });
+        cx.on_action(|_: &ReturnLocal, cx| {
+            if let Some(state) = cx.try_global::<ApplicationState>() {
+                TerminalApp::show_main(state.terminal.clone(), cx);
+            }
+        });
+        text_input::init(cx);
+        tab_editor::init(cx);
+        pane_editor::init(cx);
+        ui::init(cx);
+        cx.bind_keys([
+            KeyBinding::new("cmd-shift-e", CustomizeTab, None),
+            KeyBinding::new("escape", DismissTabMenu, Some("TabMenu")),
+            KeyBinding::new("cmd-q", Quit, None),
+            KeyBinding::new("cmd-w", CloseWindow, None),
+            KeyBinding::new("escape", CloseWindow, Some("About")),
+            KeyBinding::new("cmd-shift-w", CloseTab, None),
+            KeyBinding::new("cmd-t", NewSession, None),
+            KeyBinding::new("ctrl-tab", NextSession, None),
+            KeyBinding::new("ctrl-shift-tab", PreviousSession, None),
+            KeyBinding::new("cmd-b", ToggleSidebar, None),
+            KeyBinding::new("cmd-,", ToggleSettings, None),
+            KeyBinding::new("escape", settings::CloseSettings, Some("Settings")),
+            KeyBinding::new("cmd-d", SplitRight, None),
+            KeyBinding::new("cmd-shift-d", SplitDown, None),
+            KeyBinding::new("cmd-]", NextPane, None),
+            KeyBinding::new("cmd-[", PreviousPane, None),
+            KeyBinding::new("cmd-shift-]", NextAgent, Some("HerdrTerminal")),
+            KeyBinding::new("cmd-shift-[", PreviousAgent, Some("HerdrTerminal")),
+            KeyBinding::new("cmd-alt-right", NextPane, None),
+            KeyBinding::new("cmd-alt-left", PreviousPane, None),
+            KeyBinding::new("cmd-shift-enter", TogglePaneZoom, None),
+            KeyBinding::new("cmd-shift-z", ToggleZen, None),
+            KeyBinding::new("cmd-c", Copy, Some("Terminal")),
+            KeyBinding::new("cmd-v", Paste, Some("Terminal")),
+            KeyBinding::new("cmd-a", SelectAll, Some("Terminal")),
+            KeyBinding::new("cmd-=", IncreaseFont, None),
+            KeyBinding::new("cmd-+", IncreaseFont, None),
+            KeyBinding::new("cmd--", DecreaseFont, None),
+            KeyBinding::new("cmd-0", ResetFont, None),
+            KeyBinding::new("cmd-shift-r", Restart, None),
+        ]);
+        cx.bind_keys((0..9).map(|index| {
+            KeyBinding::new(&format!("cmd-{}", index + 1), SelectTab { index }, None)
+        }));
+        match cx.open_window(main_window_options(cx), |window, cx| {
+            let terminal = cx.new(|cx| TerminalApp::new(directory, window, cx));
+            cx.set_global(ApplicationState {
+                terminal: terminal.clone(),
+                about_window: None,
+            });
+            terminal
+        }) {
+            Ok(_) => cx.activate(true),
+            Err(error) => {
+                eprintln!("Open terminal window: {error}");
+                cx.quit();
+            }
+        }
+    });
 }

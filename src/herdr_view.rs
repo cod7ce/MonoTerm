@@ -162,22 +162,11 @@ impl HerdrWindow {
             view.owner
                 .update(cx, |root, cx| root.apply_appearance(window, cx, false));
         });
-        let close_connection = connection.clone();
-        let shared = owner.clone();
+        let entity = cx.weak_entity();
         window.on_window_should_close(cx, move |_, cx| {
-            shared.update(cx, |root, cx| {
-                root.herdr_window = None;
-                cx.notify();
-            });
-            close_connection.update(cx, |connection, cx| {
-                if let Err(error) = connection.set_surface_active(false) {
-                    eprintln!("Herdr detach: {error}");
-                }
-                if let Err(error) = connection.set_focus(false) {
-                    eprintln!("Herdr focus: {error}");
-                }
-                cx.notify();
-            });
+            if let Err(error) = entity.update(cx, |view, cx| view.detach(cx)) {
+                eprintln!("Close Herdr window: {error}");
+            }
             true
         });
         let mut view = Self {
@@ -243,6 +232,22 @@ impl HerdrWindow {
         view.apply_material(window, cx);
         view.focus(window, cx);
         view
+    }
+
+    fn detach(&mut self, cx: &mut Context<Self>) {
+        self.owner.update(cx, |root, cx| {
+            root.herdr_window = None;
+            cx.notify();
+        });
+        self.connection.update(cx, |connection, cx| {
+            if let Err(error) = connection.set_surface_active(false) {
+                eprintln!("Herdr detach: {error}");
+            }
+            if let Err(error) = connection.set_focus(false) {
+                eprintln!("Herdr focus: {error}");
+            }
+            cx.notify();
+        });
     }
 
     pub(crate) fn focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1166,6 +1171,10 @@ impl Render for HerdrWindow {
                 view.cancel_links();
                 view.owner
                     .update(cx, |root, cx| root.open_settings(window, cx));
+            }))
+            .on_action(cx.listener(|view, _: &crate::CloseWindow, window, cx| {
+                view.detach(cx);
+                window.remove_window();
             }))
             .on_action(cx.listener(|view, _: &crate::CloseSession, _, cx| view.close_pane(cx)))
             .on_action(cx.listener(|view, _: &crate::CloseTab, _, cx| view.close_tab(cx)))
