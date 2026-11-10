@@ -180,6 +180,15 @@ fn chinese(english: &str) -> Option<&'static str> {
         "Appearance" => "外观",
         "Window" => "窗口",
         "Terminal" => "终端",
+        "Scrollback lines" => "历史记录行数",
+        "Terminal history and text appearance." => "设置终端历史记录和文字显示。",
+        "Default 10000 · 0 means unlimited" => "默认 10000 行 · 0 表示不限制",
+        "Applies immediately to local panes. Herdr history is managed by its daemon." => {
+            "立即应用到本地终端窗格。Herdr 的历史记录由其守护进程管理。"
+        }
+        "Enter a non-negative whole number; 0 means unlimited." => "请输入非负整数；0 表示不限制。",
+        "Apply" => "应用",
+        "Clear Terminal" => "清空终端",
         "Shortcuts" => "快捷键",
         "Integrations" => "集成",
         "Version" => "版本",

@@ -2,7 +2,7 @@
 
 A native macOS terminal built with Rust, GPUI and Ghostty. Each local pane owns a real PTY; Ghostty handles terminal state and GPUI renders the terminal and application.
 
-**当前版本：0.3.3。** 适用于 Apple Silicon Mac，要求 macOS 14 或更高版本。
+**当前版本：0.3.4。** 适用于 Apple Silicon Mac，要求 macOS 14 或更高版本。
 
 ## Features
 
@@ -65,6 +65,7 @@ The app bundle contains its runtime resources and framework. Cargo, Zig and the 
 | Toggle Zen | Cmd-Shift-Z |
 | Open Settings | Cmd-comma |
 | Copy / paste / select all | Cmd-C / Cmd-V / Cmd-A |
+| 清空当前终端窗格及历史记录 | Cmd-K |
 | Increase / decrease / reset font size | Cmd-plus / Cmd-minus / Cmd-0 |
 | Restart active shell | Cmd-Shift-R |
 | Quit | Cmd-Q |
@@ -78,6 +79,10 @@ The mouse wheel scrolls the pane under the pointer in either window; its magnitu
 Double-click or right-click a pane's title to rename that pane in either window. Edit → Rename pane also works when the title is hidden. Pane names are independent of tab names; leaving the field blank restores the automatic name. Local pane names last for the current session; Herdr names are stored by its daemon. Drag a divider to adjust split proportions in either window. Herdr coalesces motion while waiting for acknowledgements and stops the drag if its tab, pane tree, popup state or window geometry changes.
 
 Local limits are 12 tabs, 8 panes per tab and 48 panes total. Closing a pane terminates its shell; closing a tab terminates all its panes. Tabs and pane layouts are not restored after quitting. Preferences are stored under `~/Library/Application Support/MonoTerm/`; `MONOTERM_CONFIG_DIR` selects an isolated test directory.
+
+“设置 → 终端 → 历史记录行数”可以配置本地终端的回滚历史，默认 10000 行，设为 0 时不限制。点击“应用”或在输入框中按回车后立即生效，并保存到 `terminal.json`；现有窗格、新建窗格和重启后的本地终端均使用该设置。Ghostty 按内存页回收历史，因此实际保留行数会在设定值附近浮动；减小上限时，较早的历史可能立即被移除。Herdr 历史上限由其守护进程管理。
+
+`⌘K` 或“编辑 → 清空终端”清空当前活动窗格的画面和回滚历史，不重启 shell，也不影响其他窗格。Herdr 窗口通过守护进程的 `pane.clear` 执行同一操作，需要所连接的守护进程支持此接口。
 
 Font family and size are shared and saved automatically (Menlo, 14px by default; 10–28px). Settings → Terminal searches installed fonts, initially filters to monospace families, and previews English, CJK, code, Nerd symbols and emoji. Show all fonts includes proportional families, which still occupy terminal grid cells. Missing fonts temporarily use Menlo while retaining the chosen name. Install/uninstall font changes are detected after restarting MonoTerm. Settings itself keeps the system font.
 
@@ -138,6 +143,8 @@ The 0.3.1 release passed 265 application/component tests (one opt-in ignored), s
 The 0.3.2 release passed 273 application/component tests (one opt-in ignored), strict all-target/all-feature Clippy, formatting, eight updater lifecycle scenarios, and Ed25519 signature tests. The signed release archive passed ZIP integrity, SHA256, appcast metadata, and extracted-bundle signature verification. This release adds independent pane names in both windows, Herdr split-divider dragging, and window-level local resize handling. Native pane editor and divider interactions remain unverified because Accessibility access was unavailable; full cross-version update installation and notarization are not claimed.
 
 0.3.3 发布前通过了 273 项应用及组件测试（另有 1 项需手动启用的测试未运行）、全目标及全特性的严格 Clippy、格式检查、8 项更新器生命周期检查和 Ed25519 签名自测。独立测试实例通过 33 项原生窗口检查，覆盖关闭按钮、⌘W、⌘Q、窗口重新打开，以及关于页面的单窗口复用、中英文和深浅主题；两种主题的关于页面截图均已检查。尚未验证完整的跨版本下载安装与重启流程，也未进行 Apple 公证。
+
+0.3.4 发布前通过了 282 项应用及组件测试（另有 1 项需手动启用的测试未运行）、全目标及全特性的严格 Clippy、格式检查、8 项更新器生命周期检查和 Ed25519 签名自测。22 项原生检查覆盖历史行数设置、无限历史、即时生效、持久化、清屏后 shell 状态保留和分屏隔离，中英文设置截图均已检查，开发版也已通过手动确认。发布安装包通过 ZIP 完整性、SHA256、版本及更新源元数据、Ed25519 和解压后代码签名验证。Herdr 清屏通过协议层回归测试，尚未连接真实守护进程验证；完整跨版本更新安装与 Apple 公证仍未验证。
 
 Native GUI checks require a logged-in, unlocked macOS desktop and Accessibility/Screen Recording access. Use separate test-owned windows and configurations. Never restart an existing user terminal as part of verification. Existing upstream Rust future-compatibility warnings may still appear.
 

@@ -10,7 +10,7 @@ index 41339b5..303338e 100644
 +gpui = { path = "../zed/crates/gpui", package = "gpui" }
  smallvec = { version = "1.15", features = ["const_new"] }
 diff --git a/crates/ghostty_vt/src/lib.rs b/crates/ghostty_vt/src/lib.rs
-index 27e2c81..fa8920e 100644
+index 27e2c81..bfc965d 100644
 --- a/crates/ghostty_vt/src/lib.rs
 +++ b/crates/ghostty_vt/src/lib.rs
 @@ -1,6 +1,27 @@
@@ -41,7 +41,23 @@ index 27e2c81..fa8920e 100644
  
  #[derive(Debug)]
  pub enum Error {
-@@ -25,6 +46,172 @@ impl std::error::Error for Error {}
+@@ -8,6 +29,7 @@ pub enum Error {
+     FeedFailed(i32),
+     ScrollFailed(i32),
+     DumpFailed,
++    ConfigureFailed(i32),
+ }
+ 
+ impl fmt::Display for Error {
+@@ -17,6 +39,7 @@ impl fmt::Display for Error {
+             Error::FeedFailed(code) => write!(f, "terminal feed failed: {code}"),
+             Error::ScrollFailed(code) => write!(f, "terminal scroll failed: {code}"),
+             Error::DumpFailed => write!(f, "terminal dump failed"),
++            Error::ConfigureFailed(code) => write!(f, "terminal configuration failed: {code}"),
+         }
+     }
+ }
+@@ -25,6 +48,172 @@ impl std::error::Error for Error {}
  
  pub struct Terminal {
      ptr: NonNull<c_void>,
@@ -214,7 +230,7 @@ index 27e2c81..fa8920e 100644
  }
  
  #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-@@ -34,6 +221,23 @@ pub struct Rgb {
+@@ -34,6 +223,23 @@ pub struct Rgb {
      pub b: u8,
  }
  
@@ -238,7 +254,7 @@ index 27e2c81..fa8920e 100644
  #[derive(Clone, Copy, Debug, PartialEq, Eq)]
  pub struct CellStyle {
      pub fg: Rgb,
-@@ -85,21 +289,104 @@ pub fn encode_key_named(name: &str, modifiers: KeyModifiers) -> Option<Vec<u8>>
+@@ -85,21 +291,104 @@ pub fn encode_key_named(name: &str, modifiers: KeyModifiers) -> Option<Vec<u8>>
      let bytes = unsafe {
          ghostty_vt_sys::ghostty_vt_encode_key_named(name.as_ptr(), name.len(), modifiers.bits())
      };
@@ -352,7 +368,29 @@ index 27e2c81..fa8920e 100644
      }
  
      pub fn set_default_colors(&mut self, fg: Rgb, bg: Rgb) {
-@@ -139,28 +426,37 @@ impl Terminal {
+@@ -116,6 +405,21 @@ impl Terminal {
+         }
+     }
+ 
++    pub fn set_scrollback_lines(&mut self, lines: usize) -> Result<(), Error> {
++        let result = unsafe {
++            ghostty_vt_sys::ghostty_vt_terminal_set_scrollback_lines(self.ptr.as_ptr(), lines)
++        };
++        if result == 0 {
++            Ok(())
++        } else {
++            Err(Error::ConfigureFailed(result))
++        }
++    }
++
++    pub fn scrollback_rows(&self) -> usize {
++        unsafe { ghostty_vt_sys::ghostty_vt_terminal_scrollback_rows(self.ptr.as_ptr()) }
++    }
++
+     pub fn feed(&mut self, bytes: &[u8]) -> Result<(), Error> {
+         let rc = unsafe {
+             ghostty_vt_sys::ghostty_vt_terminal_feed(self.ptr.as_ptr(), bytes.as_ptr(), bytes.len())
+@@ -139,28 +443,37 @@ impl Terminal {
  
      pub fn dump_viewport(&self) -> Result<String, Error> {
          let bytes = unsafe { ghostty_vt_sys::ghostty_vt_terminal_dump_viewport(self.ptr.as_ptr()) };
@@ -404,7 +442,7 @@ index 27e2c81..fa8920e 100644
      }
  
      pub fn dump_viewport_row_cell_styles(&self, row: u16) -> Result<Vec<CellStyle>, Error> {
-@@ -170,21 +466,16 @@ impl Terminal {
+@@ -170,21 +483,16 @@ impl Terminal {
                  row,
              )
          };
@@ -431,7 +469,7 @@ index 27e2c81..fa8920e 100644
              out.push(CellStyle {
                  fg: Rgb {
                      r: chunk[0],
-@@ -200,7 +491,6 @@ impl Terminal {
+@@ -200,7 +508,6 @@ impl Terminal {
              });
          }
  
@@ -439,7 +477,7 @@ index 27e2c81..fa8920e 100644
          Ok(out)
      }
  
-@@ -208,21 +498,16 @@ impl Terminal {
+@@ -208,21 +515,16 @@ impl Terminal {
          let bytes = unsafe {
              ghostty_vt_sys::ghostty_vt_terminal_dump_viewport_row_style_runs(self.ptr.as_ptr(), row)
          };
@@ -466,7 +504,7 @@ index 27e2c81..fa8920e 100644
              out.push(StyleRun {
                  start_col: u16::from_ne_bytes([chunk[0], chunk[1]]),
                  end_col: u16::from_ne_bytes([chunk[2], chunk[3]]),
-@@ -240,7 +525,6 @@ impl Terminal {
+@@ -240,7 +542,6 @@ impl Terminal {
              });
          }
  
@@ -474,7 +512,7 @@ index 27e2c81..fa8920e 100644
          Ok(out)
      }
  
-@@ -248,20 +532,15 @@ impl Terminal {
+@@ -248,20 +549,15 @@ impl Terminal {
          let bytes = unsafe {
              ghostty_vt_sys::ghostty_vt_terminal_take_dirty_viewport_rows(self.ptr.as_ptr(), rows)
          };
@@ -499,7 +537,7 @@ index 27e2c81..fa8920e 100644
          Ok(out)
      }
  
-@@ -269,6 +548,7 @@ impl Terminal {
+@@ -269,6 +565,7 @@ impl Terminal {
          unsafe { ghostty_vt_sys::ghostty_vt_terminal_take_viewport_scroll_delta(self.ptr.as_ptr()) }
      }
  
@@ -507,7 +545,7 @@ index 27e2c81..fa8920e 100644
      pub fn cursor_position(&self) -> Option<(u16, u16)> {
          let mut col: u16 = 0;
          let mut row: u16 = 0;
-@@ -286,14 +566,8 @@ impl Terminal {
+@@ -286,14 +583,8 @@ impl Terminal {
          let bytes = unsafe {
              ghostty_vt_sys::ghostty_vt_terminal_hyperlink_at(self.ptr.as_ptr(), col, row)
          };
@@ -683,7 +721,7 @@ index 8ae5004..c18ad9c 100644
 +    PathBuf::from("zig")
  }
 diff --git a/crates/ghostty_vt_sys/include/ghostty_vt.h b/crates/ghostty_vt_sys/include/ghostty_vt.h
-index f8d8d5c..68eb5bb 100644
+index f8d8d5c..a1716ac 100644
 --- a/crates/ghostty_vt_sys/include/ghostty_vt.h
 +++ b/crates/ghostty_vt_sys/include/ghostty_vt.h
 @@ -1,5 +1,5 @@
@@ -702,7 +740,16 @@ index f8d8d5c..68eb5bb 100644
  
  ghostty_vt_terminal_t ghostty_vt_terminal_new(uint16_t cols, uint16_t rows);
  void ghostty_vt_terminal_free(ghostty_vt_terminal_t terminal);
-@@ -64,6 +65,10 @@ bool ghostty_vt_terminal_cursor_position(ghostty_vt_terminal_t terminal,
+@@ -52,6 +53,8 @@ int ghostty_vt_terminal_feed(ghostty_vt_terminal_t terminal,
+                              size_t len);
+ 
+ int ghostty_vt_terminal_resize(ghostty_vt_terminal_t terminal, uint16_t cols, uint16_t rows);
++int ghostty_vt_terminal_set_scrollback_lines(ghostty_vt_terminal_t terminal, size_t lines);
++size_t ghostty_vt_terminal_scrollback_rows(ghostty_vt_terminal_t terminal);
+ 
+ int ghostty_vt_terminal_scroll_viewport(ghostty_vt_terminal_t terminal, int32_t delta_lines);
+ int ghostty_vt_terminal_scroll_viewport_top(ghostty_vt_terminal_t terminal);
+@@ -64,6 +67,10 @@ bool ghostty_vt_terminal_cursor_position(ghostty_vt_terminal_t terminal,
  ghostty_vt_bytes_t ghostty_vt_terminal_dump_viewport(ghostty_vt_terminal_t terminal);
  ghostty_vt_bytes_t ghostty_vt_terminal_dump_viewport_row(ghostty_vt_terminal_t terminal,
                                                           uint16_t row);
@@ -713,7 +760,7 @@ index f8d8d5c..68eb5bb 100644
  ghostty_vt_bytes_t ghostty_vt_terminal_dump_viewport_row_cell_styles(ghostty_vt_terminal_t terminal,
                                                                       uint16_t row);
  ghostty_vt_bytes_t ghostty_vt_terminal_dump_viewport_row_style_runs(ghostty_vt_terminal_t terminal,
-@@ -79,6 +84,34 @@ ghostty_vt_bytes_t ghostty_vt_encode_key_named(const uint8_t* name,
+@@ -79,6 +86,34 @@ ghostty_vt_bytes_t ghostty_vt_encode_key_named(const uint8_t* name,
                                                 uint16_t modifiers);
  void ghostty_vt_bytes_free(ghostty_vt_bytes_t bytes);
  
@@ -749,10 +796,10 @@ index f8d8d5c..68eb5bb 100644
  }
  #endif
 diff --git a/crates/ghostty_vt_sys/src/lib.rs b/crates/ghostty_vt_sys/src/lib.rs
-index 57db788..e550d8b 100644
+index 57db788..c04e241 100644
 --- a/crates/ghostty_vt_sys/src/lib.rs
 +++ b/crates/ghostty_vt_sys/src/lib.rs
-@@ -4,10 +4,158 @@ pub struct ghostty_vt_bytes_t {
+@@ -4,10 +4,163 @@ pub struct ghostty_vt_bytes_t {
      pub len: usize,
  }
  
@@ -865,6 +912,11 @@ index 57db788..e550d8b 100644
 +}
  
  unsafe extern "C" {
++    pub fn ghostty_vt_terminal_set_scrollback_lines(
++        terminal: *mut core::ffi::c_void,
++        lines: usize,
++    ) -> i32;
++    pub fn ghostty_vt_terminal_scrollback_rows(terminal: *mut core::ffi::c_void) -> usize;
 +    fn ghostty_sys_set(option: i32, value: *const core::ffi::c_void) -> i32;
 +    fn ghostty_alloc(allocator: *const core::ffi::c_void, len: usize) -> *mut u8;
 +    pub fn ghostty_vt_terminal_set_capture(
@@ -913,7 +965,7 @@ index 57db788..e550d8b 100644
      pub fn ghostty_vt_terminal_new(cols: u16, rows: u16) -> *mut core::ffi::c_void;
      pub fn ghostty_vt_terminal_free(terminal: *mut core::ffi::c_void);
  
-@@ -61,6 +209,11 @@ unsafe extern "C" {
+@@ -61,6 +214,11 @@ unsafe extern "C" {
          row: u16,
      ) -> ghostty_vt_bytes_t;
  
@@ -1934,10 +1986,10 @@ index cbd24d6..30bcf89 100644
  unicode-width = "0.2"
 +url = "2"
 diff --git a/crates/gpui_ghostty_terminal/src/session.rs b/crates/gpui_ghostty_terminal/src/session.rs
-index 78ebafb..55abccc 100644
+index 78ebafb..6e6edec 100644
 --- a/crates/gpui_ghostty_terminal/src/session.rs
 +++ b/crates/gpui_ghostty_terminal/src/session.rs
-@@ -10,11 +10,11 @@ pub struct TerminalSession {
+@@ -10,16 +10,17 @@ pub struct TerminalSession {
      mouse_button_event_enabled: bool,
      mouse_any_event_enabled: bool,
      mouse_sgr_enabled: bool,
@@ -1952,7 +2004,13 @@ index 78ebafb..55abccc 100644
  }
  
  impl TerminalSession {
-@@ -29,11 +29,11 @@ impl TerminalSession {
+     pub fn new(config: TerminalConfig) -> Result<Self, Error> {
+         let mut terminal = Terminal::new(config.cols, config.rows)?;
++        terminal.set_scrollback_lines(config.scrollback_lines)?;
+         terminal.set_default_colors(config.default_fg, config.default_bg);
+         Ok(Self {
+             config,
+@@ -29,14 +30,25 @@ impl TerminalSession {
              mouse_button_event_enabled: false,
              mouse_any_event_enabled: false,
              mouse_sgr_enabled: false,
@@ -1967,7 +2025,21 @@ index 78ebafb..55abccc 100644
          })
      }
  
-@@ -73,6 +73,10 @@ impl TerminalSession {
++    pub fn set_scrollback_lines(&mut self, lines: usize) -> Result<(), Error> {
++        self.terminal.set_scrollback_lines(lines)?;
++        self.config.scrollback_lines = lines;
++        Ok(())
++    }
++
++    pub fn clear(&mut self) -> Result<(), Error> {
++        self.feed(b"\x18\x1b[?2026l\x1b[H\x1b[2J\x1b[3J\x1b_Ga=d,d=A\x1b\\")?;
++        self.terminal.scroll_viewport_bottom()
++    }
++
+     pub fn cols(&self) -> u16 {
+         self.config.cols
+     }
+@@ -73,6 +85,10 @@ impl TerminalSession {
          self.mouse_any_event_enabled
      }
  
@@ -1978,7 +2050,7 @@ index 78ebafb..55abccc 100644
      pub fn title(&self) -> Option<&str> {
          self.title.as_deref()
      }
-@@ -90,157 +94,168 @@ impl TerminalSession {
+@@ -90,157 +106,168 @@ impl TerminalSession {
      }
  
      fn update_state_from_output(&mut self, bytes: &[u8]) {
@@ -2027,14 +2099,6 @@ index 78ebafb..55abccc 100644
 -                        nums.push(num);
 -                        num = 0;
 -                        saw_digit = false;
--                    }
--                    k += 1;
--                    continue;
--                }
--
--                if b == b'h' || b == b'l' {
--                    if saw_digit {
--                        nums.push(num);
 +            if byte == 0x1b {
 +                self.output_state = match self.output_state {
 +                    Osc => OscEscape,
@@ -2044,6 +2108,14 @@ index 78ebafb..55abccc 100644
 +                        self.output_sequence.clear();
 +                        Escape
                      }
+-                    k += 1;
+-                    continue;
+-                }
+-
+-                if b == b'h' || b == b'l' {
+-                    if saw_digit {
+-                        nums.push(num);
+-                    }
 -
 -                    let enabled = b == b'h';
 -                    for ps in nums {
@@ -2207,7 +2279,7 @@ index 78ebafb..55abccc 100644
 +    fn apply_private_modes(&mut self, command: u8) {
 +        if !matches!(command, b'h' | b'l') {
 +            return;
-+        }
+         }
 +        let Some(parameters) = self.output_sequence.strip_prefix(b"?") else {
 +            return;
 +        };
@@ -2216,7 +2288,7 @@ index 78ebafb..55abccc 100644
 +            .all(|byte| byte.is_ascii_digit() || *byte == b';')
 +        {
 +            return;
-         }
++        }
 +        let enabled = command == b'h';
 +        for parameter in parameters.split(|byte| *byte == b';') {
 +            let mode = parameter.iter().fold(0_u32, |value, digit| {
@@ -2275,7 +2347,7 @@ index 78ebafb..55abccc 100644
      }
  
      pub fn feed_with_pty_responses(
-@@ -249,50 +264,28 @@ impl TerminalSession {
+@@ -249,50 +276,28 @@ impl TerminalSession {
          mut send: impl FnMut(&[u8]),
      ) -> Result<(), Error> {
          self.update_state_from_output(bytes);
@@ -2344,7 +2416,7 @@ index 78ebafb..55abccc 100644
      }
  
      pub fn dump_viewport(&self) -> Result<String, Error> {
-@@ -303,6 +296,13 @@ impl TerminalSession {
+@@ -303,6 +308,13 @@ impl TerminalSession {
          self.terminal.dump_viewport_row(row)
      }
  
@@ -2358,7 +2430,7 @@ index 78ebafb..55abccc 100644
      pub fn dump_viewport_row_cell_styles(
          &self,
          row: u16,
-@@ -350,142 +350,17 @@ impl TerminalSession {
+@@ -350,142 +362,17 @@ impl TerminalSession {
      }
  }
  
@@ -2511,10 +2583,94 @@ index 78ebafb..55abccc 100644
  
  fn decode_osc_52(payload: &[u8]) -> Option<String> {
 diff --git a/crates/gpui_ghostty_terminal/src/tests.rs b/crates/gpui_ghostty_terminal/src/tests.rs
-index 9338d63..b47d2f7 100644
+index 9338d63..9e0602a 100644
 --- a/crates/gpui_ghostty_terminal/src/tests.rs
 +++ b/crates/gpui_ghostty_terminal/src/tests.rs
-@@ -296,24 +296,27 @@ fn responds_to_osc_10_and_11_use_configured_defaults() {
+@@ -5,6 +5,83 @@ use crate::{TerminalConfig, TerminalSession};
+ 
+ actions!(tab_shadow_test, [RootTab, TerminalTab]);
+ 
++#[test]
++fn clear_removes_screen_history_and_images_without_resetting_modes_or_title() {
++    let config = TerminalConfig {
++        scrollback_lines: 0,
++        ..Default::default()
++    };
++    let mut session = TerminalSession::new(config).unwrap();
++    session.feed(b"\x1b[?2004h\x1b]2;keep-title\x07").unwrap();
++    for index in 0..200 {
++        session
++            .feed(format!("history {index}\r\n").as_bytes())
++            .unwrap();
++    }
++    session
++        .feed(b"\x1b_Ga=T,f=32,s=1,v=1,i=99;/////w==\x1b\\")
++        .unwrap();
++    assert!(!session.images().unwrap().is_empty());
++    session.scroll_viewport_top().unwrap();
++    assert!(session.dump_viewport().unwrap().contains("history 0"));
++    session.clear().unwrap();
++    assert!(session.dump_viewport().unwrap().trim().is_empty());
++    session.scroll_viewport_top().unwrap();
++    assert!(session.dump_viewport().unwrap().trim().is_empty());
++    assert!(session.images().unwrap().is_empty());
++    assert!(session.bracketed_paste_enabled());
++    assert_eq!(session.title(), Some("keep-title"));
++    session.feed(b"still running").unwrap();
++    assert!(
++        session
++            .dump_viewport()
++            .unwrap()
++            .starts_with("still running")
++    );
++}
++
++#[test]
++fn clear_releases_synchronized_output_and_handles_an_incomplete_sequence() {
++    let mut session = TerminalSession::new(TerminalConfig::default()).unwrap();
++    session
++        .feed(b"old\x1b[?2026hhidden\x1b]2;unfinished")
++        .unwrap();
++    session.clear().unwrap();
++    assert!(session.dump_viewport().unwrap().trim().is_empty());
++    session.feed(b"new").unwrap();
++    assert!(session.dump_viewport().unwrap().starts_with("new"));
++}
++
++#[test]
++fn clear_alternate_screen_preserves_the_primary_screen_and_other_sessions() {
++    let mut session = TerminalSession::new(TerminalConfig::default()).unwrap();
++    let mut other = TerminalSession::new(TerminalConfig::default()).unwrap();
++    session.feed(b"primary\x1b[?1049halternate").unwrap();
++    other.feed(b"other pane").unwrap();
++    session.clear().unwrap();
++    assert!(session.dump_viewport().unwrap().trim().is_empty());
++    assert!(other.dump_viewport().unwrap().contains("other pane"));
++    session.feed(b"\x1b[?1049l").unwrap();
++    assert!(session.dump_viewport().unwrap().contains("primary"));
++}
++
++#[test]
++fn default_scrollback_keeps_ten_thousand_lines_instead_of_ten_thousand_bytes() {
++    let config = TerminalConfig::default();
++    assert_eq!(config.scrollback_lines, 10_000);
++    let mut session = TerminalSession::new(config).unwrap();
++    for index in 0..9_000 {
++        session
++            .feed(format!("history {index:05}\r\n").as_bytes())
++            .unwrap();
++    }
++    session.scroll_viewport_top().unwrap();
++    assert!(session.dump_viewport().unwrap().contains("history 00000"));
++    session.set_scrollback_lines(100).unwrap();
++    session.scroll_viewport_top().unwrap();
++    assert!(!session.dump_viewport().unwrap().contains("history 00000"));
++}
++
+ fn osc_color_response(ps: u8, (r, g, b): (u8, u8, u8)) -> String {
+     let r16 = u16::from(r) * 0x0101;
+     let g16 = u16::from(g) * 0x0101;
+@@ -296,24 +373,27 @@ fn responds_to_osc_10_and_11_use_configured_defaults() {
  
  #[test]
  fn responds_to_osc_11_across_chunk_boundaries() {
@@ -2559,7 +2715,7 @@ index 9338d63..b47d2f7 100644
  }
  
  #[test]
-@@ -327,8 +330,8 @@ fn responds_to_osc_11_query_terminated_by_bel() {
+@@ -327,8 +407,8 @@ fn responds_to_osc_11_query_terminated_by_bel() {
          })
          .unwrap();
  
@@ -2570,7 +2726,7 @@ index 9338d63..b47d2f7 100644
  }
  
  #[test]
-@@ -396,3 +399,242 @@ fn maps_common_box_drawing_glyphs() {
+@@ -396,3 +476,242 @@ fn maps_common_box_drawing_glyphs() {
      }
      assert!(crate::view::box_drawing_mask('X').is_none());
  }
@@ -2814,7 +2970,7 @@ index 9338d63..b47d2f7 100644
 +    assert_eq!(session.take_clipboard_write().as_deref(), Some("hi"));
 +}
 diff --git a/crates/gpui_ghostty_terminal/src/view/mod.rs b/crates/gpui_ghostty_terminal/src/view/mod.rs
-index 6d680bc..62b8a23 100644
+index 6d680bc..9244107 100644
 --- a/crates/gpui_ghostty_terminal/src/view/mod.rs
 +++ b/crates/gpui_ghostty_terminal/src/view/mod.rs
 @@ -1,5 +1,5 @@
@@ -3474,7 +3630,45 @@ index 6d680bc..62b8a23 100644
              self.reconcile_dirty_viewport_after_output();
              cx.notify();
              return;
-@@ -767,6 +948,9 @@ impl TerminalView {
+@@ -759,6 +940,37 @@ impl TerminalView {
+         cx.notify();
+     }
+ 
++    pub fn set_scrollback_lines(
++        &mut self,
++        lines: usize,
++        cx: &mut Context<Self>,
++    ) -> Result<(), ghostty_vt::Error> {
++        self.session.set_scrollback_lines(lines)?;
++        self.selection = None;
++        self.selecting = false;
++        self.cancel_link_interaction();
++        self.sync_viewport_scroll_tracking();
++        self.pending_refresh = true;
++        cx.notify();
++        Ok(())
++    }
++
++    pub fn clear(&mut self, cx: &mut Context<Self>) -> Result<(), ghostty_vt::Error> {
++        let pending = std::mem::take(&mut self.pending_output);
++        self.feed_output_bytes_to_session(&pending);
++        self.apply_side_effects(cx);
++        self.session.clear()?;
++        self.selection = None;
++        self.selecting = false;
++        self.scroll.reset();
++        self.cancel_link_interaction();
++        self.image_cache.clear(cx);
++        self.sync_viewport_scroll_tracking();
++        self.pending_refresh = true;
++        cx.notify();
++        Ok(())
++    }
++
+     pub fn resize_terminal(&mut self, cols: u16, rows: u16, cx: &mut Context<Self>) {
+         let _ = self.session.resize(cols, rows);
+         self.sync_viewport_scroll_tracking();
+@@ -767,6 +979,9 @@ impl TerminalView {
      }
  
      fn on_paste(&mut self, _: &Paste, _window: &mut Window, cx: &mut Context<Self>) {
@@ -3484,7 +3678,7 @@ index 6d680bc..62b8a23 100644
          let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
              return;
          };
-@@ -778,22 +962,41 @@ impl TerminalView {
+@@ -778,22 +993,41 @@ impl TerminalView {
          }
      }
  
@@ -3533,7 +3727,7 @@ index 6d680bc..62b8a23 100644
          self.selection = Some(ByteSelection {
              anchor: 0,
              active: self.viewport_total_len,
-@@ -809,41 +1012,17 @@ impl TerminalView {
+@@ -809,41 +1043,17 @@ impl TerminalView {
          cx: &mut Context<Self>,
      ) {
          self.focus_handle.focus(window, cx);
@@ -3581,7 +3775,7 @@ index 6d680bc..62b8a23 100644
          }
  
          if event.modifiers.shift
-@@ -858,6 +1037,7 @@ impl TerminalView {
+@@ -858,6 +1068,7 @@ impl TerminalView {
                      anchor: index,
                      active: index,
                  });
@@ -3589,7 +3783,7 @@ index 6d680bc..62b8a23 100644
                  cx.notify();
              }
              return;
-@@ -888,17 +1068,33 @@ impl TerminalView {
+@@ -888,17 +1099,33 @@ impl TerminalView {
      }
  
      fn on_mouse_up(&mut self, event: &MouseUpEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -3629,7 +3823,7 @@ index 6d680bc..62b8a23 100644
              return;
          }
  
-@@ -932,7 +1128,18 @@ impl TerminalView {
+@@ -932,7 +1159,18 @@ impl TerminalView {
          window: &mut Window,
          cx: &mut Context<Self>,
      ) {
@@ -3649,7 +3843,7 @@ index 6d680bc..62b8a23 100644
              && self.input.is_some()
              && self.session.mouse_reporting_enabled()
              && self.session.mouse_sgr_enabled()
-@@ -973,11 +1180,7 @@ impl TerminalView {
+@@ -973,11 +1211,7 @@ impl TerminalView {
              }
          }
  
@@ -3662,7 +3856,7 @@ index 6d680bc..62b8a23 100644
              return;
          }
  
-@@ -994,6 +1197,13 @@ impl TerminalView {
+@@ -994,6 +1228,13 @@ impl TerminalView {
      }
  
      fn on_key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
@@ -3676,7 +3870,7 @@ index 6d680bc..62b8a23 100644
          let raw_keystroke = event.keystroke.clone();
          if should_skip_key_down_for_ime(self.input.is_some(), &raw_keystroke) {
              return;
-@@ -1006,7 +1216,7 @@ impl TerminalView {
+@@ -1006,7 +1247,7 @@ impl TerminalView {
  
          let scroll_step = (self.session.rows() as i32 / 2).max(1);
  
@@ -3685,7 +3879,7 @@ index 6d680bc..62b8a23 100644
              if keystroke.modifiers.shift {
                  match keystroke.key.as_str() {
                      "home" => {
-@@ -1044,15 +1254,14 @@ impl TerminalView {
+@@ -1044,15 +1285,14 @@ impl TerminalView {
              if keystroke.modifiers.control
                  && let Some(b) = ctrl_byte_for_keystroke(&keystroke)
              {
@@ -3703,7 +3897,7 @@ index 6d680bc..62b8a23 100644
                  return;
              }
  
-@@ -1063,7 +1272,7 @@ impl TerminalView {
+@@ -1063,7 +1303,7 @@ impl TerminalView {
                  super_key: false,
              };
              if let Some(encoded) = encode_key_named(&keystroke.key, modifiers) {
@@ -3712,7 +3906,7 @@ index 6d680bc..62b8a23 100644
                  return;
              }
              return;
-@@ -1108,20 +1317,7 @@ impl TerminalView {
+@@ -1108,20 +1348,7 @@ impl TerminalView {
              super_key: false,
          };
          if let Some(encoded) = encode_key_named(&keystroke.key, modifiers) {
@@ -3734,7 +3928,7 @@ index 6d680bc..62b8a23 100644
          }
      }
  
-@@ -1131,12 +1327,9 @@ impl TerminalView {
+@@ -1131,12 +1358,9 @@ impl TerminalView {
          window: &mut Window,
          cx: &mut Context<Self>,
      ) {
@@ -3750,7 +3944,7 @@ index 6d680bc..62b8a23 100644
          if delta_lines == 0 {
              return;
          }
-@@ -1158,11 +1351,9 @@ impl TerminalView {
+@@ -1158,11 +1382,9 @@ impl TerminalView {
                  event.modifiers.alt,
                  event.modifiers.control,
              );
@@ -3765,7 +3959,7 @@ index 6d680bc..62b8a23 100644
              return;
          }
  
-@@ -1182,8 +1373,9 @@ impl TerminalView {
+@@ -1182,8 +1404,9 @@ impl TerminalView {
              return None;
          }
  
@@ -3777,7 +3971,7 @@ index 6d680bc..62b8a23 100644
          let mut row_index = (y / cell_height).floor() as i32;
          if row_index < 0 {
              row_index = 0;
-@@ -1194,9 +1386,7 @@ impl TerminalView {
+@@ -1194,9 +1417,7 @@ impl TerminalView {
          let row_index = row_index as usize;
  
          if let Some(Some(line)) = self.line_layouts.get(row_index) {
@@ -3788,7 +3982,7 @@ index 6d680bc..62b8a23 100644
              let offset = *self.viewport_line_offsets.get(row_index).unwrap_or(&0);
              return Some(offset.saturating_add(byte_index));
          }
-@@ -1204,7 +1394,8 @@ impl TerminalView {
+@@ -1204,7 +1425,8 @@ impl TerminalView {
          let (col, row) = self.mouse_position_to_cell(position, window)?;
          let row_index = row.saturating_sub(1) as usize;
          let line = self.viewport_lines.get(row_index)?.as_str();
@@ -3798,7 +3992,7 @@ index 6d680bc..62b8a23 100644
          let offset = *self.viewport_line_offsets.get(row_index).unwrap_or(&0);
          Some(offset.saturating_add(byte_index))
      }
-@@ -1212,13 +1403,13 @@ impl TerminalView {
+@@ -1212,13 +1434,13 @@ impl TerminalView {
      fn mouse_position_to_cell(
          &self,
          position: gpui::Point<gpui::Pixels>,
@@ -3814,7 +4008,7 @@ index 6d680bc..62b8a23 100644
          let x = f32::from(position.x);
          let y = f32::from(position.y);
  
-@@ -1352,6 +1543,7 @@ impl EntityInputHandler for TerminalView {
+@@ -1352,6 +1574,7 @@ impl EntityInputHandler for TerminalView {
  }
  
  struct TerminalPrepaintState {
@@ -3822,7 +4016,7 @@ index 6d680bc..62b8a23 100644
      line_height: Pixels,
      shaped_lines: Vec<gpui::ShapedLine>,
      background_quads: Vec<PaintQuad>,
-@@ -1369,6 +1561,7 @@ const CELL_STYLE_FLAG_UNDERLINE: u8 = 0x08;
+@@ -1369,6 +1592,7 @@ const CELL_STYLE_FLAG_UNDERLINE: u8 = 0x08;
  const CELL_STYLE_FLAG_FAINT: u8 = 0x10;
  const CELL_STYLE_FLAG_INVISIBLE: u8 = 0x20;
  const CELL_STYLE_FLAG_STRIKETHROUGH: u8 = 0x40;
@@ -3830,7 +4024,7 @@ index 6d680bc..62b8a23 100644
  
  #[derive(Clone, Copy, Debug, PartialEq)]
  struct TerminalAppearance {
-@@ -1404,10 +1597,16 @@ impl TerminalAppearance {
+@@ -1404,10 +1628,16 @@ impl TerminalAppearance {
              } else {
                  (default_fg, default_bg, self.foreground, self.background)
              };
@@ -3849,7 +4043,7 @@ index 6d680bc..62b8a23 100644
              run.bg = target_bg;
          }
          if run.flags & CELL_STYLE_FLAG_INVISIBLE != 0 {
-@@ -1419,7 +1618,8 @@ impl TerminalAppearance {
+@@ -1419,7 +1649,8 @@ impl TerminalAppearance {
  
  fn has_default_background(run: &StyleRun, default_bg: Rgb) -> bool {
      // Inverse backgrounds represent the original foreground and stay opaque.
@@ -3859,7 +4053,7 @@ index 6d680bc..62b8a23 100644
  }
  
  fn bounds_outside(bounds: Bounds<Pixels>, excluded: Option<Bounds<Pixels>>) -> Vec<Bounds<Pixels>> {
-@@ -1523,20 +1723,21 @@ pub(crate) const BOX_DIR_DOWN: u8 = 0x08;
+@@ -1523,20 +1754,21 @@ pub(crate) const BOX_DIR_DOWN: u8 = 0x08;
  pub(crate) fn box_drawing_mask(ch: char) -> Option<(u8, f32)> {
      let light = 1.0;
      let heavy = 1.35;
@@ -3893,7 +4087,7 @@ index 6d680bc..62b8a23 100644
          _ => return None,
      };
  
-@@ -1544,9 +1745,6 @@ pub(crate) fn box_drawing_mask(ch: char) -> Option<(u8, f32)> {
+@@ -1544,9 +1776,6 @@ pub(crate) fn box_drawing_mask(ch: char) -> Option<(u8, f32)> {
          '━' | '┃' | '┏' | '┓' | '┗' | '┛' | '┣' | '┫' | '┳' | '┻' | '╋' => {
              heavy
          }
@@ -3903,7 +4097,7 @@ index 6d680bc..62b8a23 100644
          _ => light,
      };
  
-@@ -1640,33 +1838,154 @@ fn text_run_for_key(base_font: &gpui::Font, key: TextRunKey, len: usize) -> Text
+@@ -1640,33 +1869,154 @@ fn text_run_for_key(base_font: &gpui::Font, key: TextRunKey, len: usize) -> Text
      }
  }
  
@@ -4074,7 +4268,7 @@ index 6d680bc..62b8a23 100644
      line.len()
  }
  
-@@ -1737,9 +2056,45 @@ impl Element for TerminalTextElement {
+@@ -1737,9 +2087,45 @@ impl Element for TerminalTextElement {
          let run_font = style.font();
          let run_color = style.color;
  
@@ -4121,7 +4315,7 @@ index 6d680bc..62b8a23 100644
              if view.viewport_lines.is_empty() {
                  view.line_layouts.clear();
                  view.line_layout_key = None;
-@@ -1784,13 +2139,14 @@ impl Element for TerminalTextElement {
+@@ -1784,13 +2170,14 @@ impl Element for TerminalTextElement {
                                      | CELL_STYLE_FLAG_STRIKETHROUGH),
                          };
  
@@ -4142,7 +4336,7 @@ index 6d680bc..62b8a23 100644
  
                          if start > byte_pos {
                              runs.push(TextRun {
-@@ -1833,15 +2189,22 @@ impl Element for TerminalTextElement {
+@@ -1833,15 +2220,22 @@ impl Element for TerminalTextElement {
                      });
                  }
  
@@ -4173,7 +4367,7 @@ index 6d680bc..62b8a23 100644
              }
          });
  
-@@ -2027,7 +2390,6 @@ impl Element for TerminalTextElement {
+@@ -2027,7 +2421,6 @@ impl Element for TerminalTextElement {
  
          let box_drawing_quads = cell_metrics(window, &font)
              .map(|(cell_width, _)| {
@@ -4181,7 +4375,7 @@ index 6d680bc..62b8a23 100644
                  let mut quads = Vec::new();
  
                  let view = self.view.read(cx);
-@@ -2036,12 +2398,11 @@ impl Element for TerminalTextElement {
+@@ -2036,12 +2429,11 @@ impl Element for TerminalTextElement {
                      let runs = view.viewport_style_runs.get(row).map(|v| v.as_slice());
                      let mut run_idx: usize = 0;
  
@@ -4198,7 +4392,7 @@ index 6d680bc..62b8a23 100644
  
                          if let Some((_, _)) = box_drawing_mask(ch) {
                              let fg = runs
-@@ -2084,8 +2445,6 @@ impl Element for TerminalTextElement {
+@@ -2084,8 +2476,6 @@ impl Element for TerminalTextElement {
                                  ch,
                              ));
                          }
@@ -4207,7 +4401,7 @@ index 6d680bc..62b8a23 100644
                      }
                  }
  
-@@ -2095,18 +2454,15 @@ impl Element for TerminalTextElement {
+@@ -2095,18 +2485,15 @@ impl Element for TerminalTextElement {
  
          let cursor = {
              let view = self.view.read(cx);
@@ -4229,7 +4423,7 @@ index 6d680bc..62b8a23 100644
  
              Some(fill(
                  Bounds::new(point(x, y), size(px(2.0), line_height)),
-@@ -2115,6 +2471,7 @@ impl Element for TerminalTextElement {
+@@ -2115,6 +2502,7 @@ impl Element for TerminalTextElement {
          });
  
          TerminalPrepaintState {
@@ -4237,7 +4431,7 @@ index 6d680bc..62b8a23 100644
              line_height,
              shaped_lines,
              background_quads,
-@@ -2137,80 +2494,127 @@ impl Element for TerminalTextElement {
+@@ -2137,80 +2525,127 @@ impl Element for TerminalTextElement {
          cx: &mut App,
      ) {
          self.view.update(cx, |view, _cx| {
@@ -4414,7 +4608,7 @@ index 6d680bc..62b8a23 100644
          });
      }
  }
-@@ -2218,13 +2622,31 @@ impl Element for TerminalTextElement {
+@@ -2218,13 +2653,31 @@ impl Element for TerminalTextElement {
  impl Render for TerminalView {
      fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
          ensure_key_bindings(cx);
@@ -4447,7 +4641,7 @@ index 6d680bc..62b8a23 100644
  
          if self.pending_refresh {
              self.refresh_viewport();
-@@ -2243,9 +2665,26 @@ impl Render for TerminalView {
+@@ -2243,9 +2696,26 @@ impl Render for TerminalView {
              }
          }
  
@@ -4474,7 +4668,7 @@ index 6d680bc..62b8a23 100644
              .track_focus(&self.focus_handle)
              .key_context(KEY_CONTEXT)
              .on_action(cx.listener(Self::on_copy))
-@@ -2262,13 +2701,38 @@ impl Render for TerminalView {
+@@ -2262,13 +2732,38 @@ impl Render for TerminalView {
              .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
              .on_mouse_up(MouseButton::Middle, cx.listener(Self::on_mouse_up))
              .on_mouse_up(MouseButton::Right, cx.listener(Self::on_mouse_up))
@@ -4513,7 +4707,7 @@ index 6d680bc..62b8a23 100644
  pub(crate) fn cell_metrics(window: &mut gpui::Window, font: &gpui::Font) -> Option<(f32, f32)> {
      let mut style = window.text_style();
      style.font_family = font.family.clone();
-@@ -2301,29 +2765,67 @@ pub(crate) fn cell_metrics(window: &mut gpui::Window, font: &gpui::Font) -> Opti
+@@ -2301,29 +2796,67 @@ pub(crate) fn cell_metrics(window: &mut gpui::Window, font: &gpui::Font) -> Opti
  mod tests {
      use ghostty_vt::Rgb;
  
@@ -4597,7 +4791,7 @@ index 6d680bc..62b8a23 100644
      }
  
      #[test]
-@@ -2454,6 +2956,71 @@ mod tests {
+@@ -2454,6 +2987,71 @@ mod tests {
          }
      }
  
@@ -5015,10 +5209,10 @@ index 0000000..653d3c0
 +}
 diff --git a/crates/ghostty_vt_sys/src/adapter.c b/crates/ghostty_vt_sys/src/adapter.c
 new file mode 100644
-index 0000000..c51dd27
+index 0000000..4c14cf1
 --- /dev/null
 +++ b/crates/ghostty_vt_sys/src/adapter.c
-@@ -0,0 +1,516 @@
+@@ -0,0 +1,534 @@
 +#ifndef _POSIX_C_SOURCE
 +#define _POSIX_C_SOURCE 200809L
 +#endif
@@ -5213,6 +5407,24 @@ index 0000000..c51dd27
 +    /* VT processing is best-effort upstream; its sticky informational error
 +       cannot be cleared and must not turn every later feed into a failure. */
 +    return GHOSTTY_SUCCESS;
++}
++
++int ghostty_vt_terminal_set_scrollback_lines(void *ptr, size_t lines) {
++    Terminal *terminal = ptr;
++    int result = ghostty_terminal_set(terminal->terminal,
++        GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES, NULL);
++    if (result) return result;
++    result = ghostty_terminal_set(terminal->terminal,
++        GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_LINES, lines ? &lines : NULL);
++    terminal->needs_update = true;
++    return result;
++}
++
++size_t ghostty_vt_terminal_scrollback_rows(void *ptr) {
++    Terminal *terminal = ptr;
++    size_t rows = 0;
++    ghostty_terminal_get(terminal->terminal, GHOSTTY_TERMINAL_DATA_SCROLLBACK_ROWS, &rows);
++    return rows;
 +}
 +
 +int ghostty_vt_terminal_resize(void *ptr, uint16_t cols, uint16_t rows) {
@@ -6418,4 +6630,73 @@ index 0000000..fbcece4
 +                .into_any_element(),
 +        )
 +    }
++}
+diff --git a/crates/gpui_ghostty_terminal/src/config.rs b/crates/gpui_ghostty_terminal/src/config.rs
+index e1b26f6..3b99725 100644
+--- a/crates/gpui_ghostty_terminal/src/config.rs
++++ b/crates/gpui_ghostty_terminal/src/config.rs
+@@ -7,6 +7,7 @@ pub struct TerminalConfig {
+     pub default_fg: Rgb,
+     pub default_bg: Rgb,
+     pub update_window_title: bool,
++    pub scrollback_lines: usize,
+ }
+ 
+ impl Default for TerminalConfig {
+@@ -25,6 +26,7 @@ impl Default for TerminalConfig {
+                 b: 0x00,
+             },
+             update_window_title: true,
++            scrollback_lines: 10_000,
+         }
+     }
+ }
+diff --git a/crates/ghostty_vt/tests/scrollback_limit.rs b/crates/ghostty_vt/tests/scrollback_limit.rs
+new file mode 100644
+index 0000000..445ba7b
+--- /dev/null
++++ b/crates/ghostty_vt/tests/scrollback_limit.rs
+@@ -0,0 +1,43 @@
++use ghostty_vt::Terminal;
++
++fn history(count: usize) -> Vec<u8> {
++    (0..count)
++        .map(|index| format!("history {index:05}\r\n"))
++        .collect::<String>()
++        .into_bytes()
++}
++
++#[test]
++fn line_limit_replaces_the_default_byte_limit_and_prunes_oldest_pages() {
++    let mut terminal = Terminal::new(80, 24).unwrap();
++    terminal.set_scrollback_lines(10_000).unwrap();
++    terminal.feed(&history(25_000)).unwrap();
++    assert!(
++        (9_000..11_000).contains(&terminal.scrollback_rows()),
++        "rows: {}",
++        terminal.scrollback_rows()
++    );
++    terminal.scroll_viewport_top().unwrap();
++    assert!(!terminal.dump_viewport().unwrap().contains("history 00000"));
++    terminal.scroll_viewport_bottom().unwrap();
++    assert!(terminal.dump_viewport().unwrap().contains("history 24999"));
++}
++
++#[test]
++fn zero_retains_history_and_live_changes_prune_without_restarting() {
++    let mut terminal = Terminal::new(80, 24).unwrap();
++    terminal.set_scrollback_lines(0).unwrap();
++    terminal.feed(&history(25_000)).unwrap();
++    assert_eq!(terminal.scrollback_rows(), 25_001 - 24);
++    terminal.scroll_viewport_top().unwrap();
++    assert!(terminal.dump_viewport().unwrap().contains("history 00000"));
++    terminal.set_scrollback_lines(200).unwrap();
++    assert!(terminal.scrollback_rows() < 1_000);
++    terminal.scroll_viewport_top().unwrap();
++    assert!(!terminal.dump_viewport().unwrap().contains("history 00000"));
++    terminal.set_scrollback_lines(0).unwrap();
++    terminal.feed(&history(4_000)).unwrap();
++    assert!(terminal.scrollback_rows() > 4_000);
++    terminal.scroll_viewport_bottom().unwrap();
++    assert!(terminal.dump_viewport().unwrap().contains("history 03999"));
 +}

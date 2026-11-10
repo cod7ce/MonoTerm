@@ -118,6 +118,18 @@ impl HerdrWindow {
         }
     }
 
+    pub(super) fn clear_pane(&mut self, cx: &mut Context<Self>) {
+        let id = self
+            .connection
+            .read(cx)
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.focused_pane_id.clone());
+        if let Some(id) = id {
+            self.perform(cx, |connection| connection.clear_pane(&id));
+        }
+    }
+
     pub(super) fn split_pane(&mut self, direction: &str, cx: &mut Context<Self>) {
         let id = self
             .connection

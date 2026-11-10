@@ -2,7 +2,7 @@
 
 MonoTerm's local release scripts build an Apple Silicon (`arm64`) application for macOS 14 or later, sign an update archive, and write release assets under `dist/`. They do not launch the app, upload assets, create Git tags, or publish releases. Run these commands from the repository on an Apple Silicon Mac with Xcode command-line tools, Rust, Python 3.11 or later, and `curl`. Prepare the pinned native dependencies with `bash scripts/bootstrap.sh` first.
 
-版本号以 `Cargo.toml` 为准，当前为 `0.3.3`。`scripts/Info.plist` 中的 `CFBundleShortVersionString` 和 `CFBundleVersion` 必须与其稳定版 `0.x.x` 版本号一致。运行 `python3 -I scripts/version.py` 可校验元数据并输出版本号。保留应用标识 **`local.monoterm.app`**，确保更新前后使用相同的应用身份。
+版本号以 `Cargo.toml` 为准，当前为 `0.3.4`。`scripts/Info.plist` 中的 `CFBundleShortVersionString` 和 `CFBundleVersion` 必须与其稳定版 `0.x.x` 版本号一致。运行 `python3 -I scripts/version.py` 可校验元数据并输出版本号。保留应用标识 **`local.monoterm.app`**，确保更新前后使用相同的应用身份。
 
 ## Sparkle SDK
 
@@ -66,7 +66,7 @@ CODE_SIGN_IDENTITY='Developer ID Application: Your Name (TEAMID)' \
 
 A real identity adds hardened runtime and a signing timestamp to all embedded code. These scripts do not notarize or staple. An Ed25519 update signature authenticates the archive to Sparkle; it does not establish Developer ID trust or bypass Gatekeeper. An ad hoc build can pass local signature checks and still be blocked when downloaded. If notarizing separately, notarize and staple the completed app before using `--skip-build` below, so the final archived bytes receive the update signature.
 
-## 打包 0.3.3
+## 打包 0.3.4
 
 The plist's stable update feed is:
 
@@ -78,29 +78,29 @@ https://github.com/cod7ce/MonoTerm/releases/latest/download/appcast.xml
 
 ```sh
 bash scripts/package-release.sh \
-  'https://github.com/cod7ce/MonoTerm/releases/download/v0.3.3'
+  'https://github.com/cod7ce/MonoTerm/releases/download/v0.3.4'
 ```
 
 To package the already built and optionally notarized release app:
 
 ```sh
 bash scripts/package-release.sh \
-  'https://github.com/cod7ce/MonoTerm/releases/download/v0.3.3' --skip-build
+  'https://github.com/cod7ce/MonoTerm/releases/download/v0.3.4' --skip-build
 ```
 
 `--skip-build` still validates source and bundled versions, key agreement, exact feed URL, bundle identifier, macOS minimum, release profile, embedded Sparkle version and components, all Mach-O architectures, and the complete bundle signature. It does not prove that a prebuilt app contains the current source revision; use it only with the intended release build.
 
-脚本会在 `dist/releases/0.3.3/` 中生成以下三个文件：
+脚本会在 `dist/releases/0.3.4/` 中生成以下三个文件：
 
-- `MonoTerm-0.3.3-arm64.zip`：使用 `ditto` 打包，包含 `MonoTerm.app`。
+- `MonoTerm-0.3.4-arm64.zip`：使用 `ditto` 打包，包含 `MonoTerm.app`。
 - `appcast.xml`：记录安装包签名、字节长度、版本号、macOS 14 最低版本和 `arm64` 硬件要求。
 - `SHA256SUMS`：记录 ZIP 安装包的 SHA256 摘要。
 
-仓库中的 CryptoKit 工具对最终 ZIP 字节签名，并使用应用内的公钥验证签名。签名保护安装包，XML 更新源本身没有单独签名。更新源只包含一个版本，不提供增量更新。打包失败不会留下已发布版本目录，也不会覆盖已有产物；每个版本的锁目录可防止并发打包。若进程被强制终止，必须先确认没有打包进程仍在使用锁，才能移除 `dist/releases/.0.3.3.lock`。
+仓库中的 CryptoKit 工具对最终 ZIP 字节签名，并使用应用内的公钥验证签名。签名保护安装包，XML 更新源本身没有单独签名。更新源只包含一个版本，不提供增量更新。打包失败不会留下已发布版本目录，也不会覆盖已有产物；每个版本的锁目录可防止并发打包。若进程被强制终止，必须先确认没有打包进程仍在使用锁，才能移除 `dist/releases/.0.3.4.lock`。
 
 ## Publish the assets
 
-本地脚本仅完成打包。将 ZIP、`appcast.xml` 和 `SHA256SUMS` 一起上传到 `cod7ce/MonoTerm` 对应的 `v0.3.3` GitHub Release，并将其发布为最新稳定版，固定更新源地址才会指向该版本；草稿或预发布版不会生效。保持 appcast 中包含版本号的下载地址和上传的 ZIP 文件名一致。签名后不要修改或替换 ZIP。
+本地脚本仅完成打包。将 ZIP、`appcast.xml` 和 `SHA256SUMS` 一起上传到 `cod7ce/MonoTerm` 对应的 `v0.3.4` GitHub Release，并将其发布为最新稳定版，固定更新源地址才会指向该版本；草稿或预发布版不会生效。保持 appcast 中包含版本号的下载地址和上传的 ZIP 文件名一致。签名后不要修改或替换 ZIP。
 
 For later releases, update `Cargo.toml`, the root `monoterm` package version in `Cargo.lock`, and both version fields in `scripts/Info.plist` together. Keep the bundle identifier, feed URL, and signing key. Use an increasing `0.x.x` version and the matching `v0.x.x` archive URL. Retain older release assets so installed clients following an older appcast can still retrieve their archive. The first installed build must already contain the correct public key to trust later updates.
 
@@ -112,7 +112,7 @@ plutil -lint scripts/Info.plist
 python3 -I scripts/version.py --release
 xcrun swift scripts/update-key.swift self-test
 codesign --verify --deep --strict dist/MonoTerm.app
-(cd dist/releases/0.3.3 && shasum -a 256 -c SHA256SUMS)
+(cd dist/releases/0.3.4 && shasum -a 256 -c SHA256SUMS)
 ```
 
 The helper self-test uses the published RFC 8032 vector and rejects a tampered message; it never accesses Keychain. SDKs, bundles, appcasts, checksums, module caches, and release archives remain under ignored `target/` or `dist/` directories. For an updater installation test, use disposable signed application copies and an isolated macOS user/home. `MONOTERM_CONFIG_DIR` deliberately disables the updater, so it is appropriate for Settings UI tests but cannot exercise an actual installation. Packaging success alone does not validate the complete download/relaunch flow or notarization.

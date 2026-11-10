@@ -16,6 +16,7 @@ mod session;
 mod settings;
 mod shell_surface;
 mod tab_editor;
+mod terminal_preferences;
 mod text_input;
 mod toast;
 mod typography;
@@ -48,6 +49,7 @@ actions!(
         Quit,
         OpenAbout,
         CloseWindow,
+        ClearTerminal,
         Restart,
         IncreaseFont,
         DecreaseFont,
@@ -102,6 +104,7 @@ struct TerminalApp {
     shell: String,
     font_size: f32,
     typography: typography::Typography,
+    terminal_preferences: terminal_preferences::TerminalPreferences,
     window_preferences: window_preferences::WindowPreferences,
     language: locale::Language,
     sidebar: bool,
@@ -199,6 +202,8 @@ impl TerminalApp {
         let (appearance, notice) = Appearance::load();
         let (language, language_notice) = locale::Language::load();
         let (typography, typography_notice) = typography::Typography::load();
+        let (terminal_preferences, terminal_notice) =
+            terminal_preferences::TerminalPreferences::load();
         let typography_notice = typography_notice.or_else(|| typography.missing_font_notice());
         let (window_preferences, window_notice) = window_preferences::WindowPreferences::load();
         set_menus(language, cx);
@@ -228,6 +233,7 @@ impl TerminalApp {
             shell,
             font_size: typography.font_size,
             typography,
+            terminal_preferences,
             language,
             sidebar: window_preferences.main.visible,
             sidebar_width: window_preferences.main.width,
@@ -253,6 +259,7 @@ impl TerminalApp {
             appearance_notice: notice
                 .or(language_notice)
                 .or(typography_notice)
+                .or(terminal_notice)
                 .or(window_notice),
             window_preferences,
             follow_controller: follow::Controller::default(),
@@ -418,6 +425,7 @@ impl TerminalApp {
             &self.shell,
             &directory,
             self.typography.font(),
+            self.terminal_preferences.scrollback_lines,
             cx,
         ));
         let previous = self.tabs.get(self.active).map(|tab| tab.id);
@@ -497,9 +505,43 @@ impl TerminalApp {
                 &self.shell,
                 &self.directory,
                 self.typography.font(),
+                self.terminal_preferences.scrollback_lines,
                 cx,
             ));
             self.focus_pane(id, window, cx);
+        }
+    }
+
+    fn set_scrollback_lines(&mut self, lines: usize, cx: &mut Context<Self>) {
+        let preferences = terminal_preferences::TerminalPreferences {
+            scrollback_lines: lines,
+        };
+        if let Err(error) = preferences.save() {
+            self.appearance_notice = Some(error);
+            cx.notify();
+            return;
+        }
+        self.terminal_preferences = preferences;
+        self.appearance_notice = None;
+        for session in &mut self.sessions {
+            if let Err(error) = session.set_scrollback_lines(lines, cx) {
+                self.appearance_notice = Some(error);
+            }
+        }
+        cx.notify();
+    }
+
+    fn clear_terminal(&mut self, cx: &mut Context<Self>) {
+        if !self.prepare_terminal_action(cx) {
+            return;
+        }
+        if let Some(view) = self
+            .active_session()
+            .and_then(|session| session.view.clone())
+            && let Err(error) = view.update(cx, |view, cx| view.clear(cx))
+        {
+            self.notice = Some(error.to_string());
+            cx.notify();
         }
     }
 
@@ -1829,6 +1871,7 @@ impl Render for TerminalApp {
             .text_color(rgb(p.text))
             .font_family(".SystemUIFont")
             .on_action(cx.listener(|root, _: &NewSession, window, cx| root.new_session(window, cx)))
+            .on_action(cx.listener(|root, _: &ClearTerminal, _, cx| root.clear_terminal(cx)))
             .on_action(cx.listener(|root, _: &CloseWindow, window, cx| {
                 root.close_main(cx);
                 window.remove_window();
@@ -2130,6 +2173,7 @@ fn set_menus(language: locale::Language, cx: &mut App) {
                 MenuItem::os_action(t("Copy"), Copy, OsAction::Copy),
                 MenuItem::os_action(t("Paste"), Paste, OsAction::Paste),
                 MenuItem::os_action(t("Select All"), SelectAll, OsAction::SelectAll),
+                MenuItem::action(t("Clear Terminal"), ClearTerminal),
                 MenuItem::separator(),
                 MenuItem::action(t("Customize tab…"), CustomizeTab),
                 MenuItem::action(t("Rename pane…"), RenamePane),
@@ -2227,6 +2271,8 @@ fn main() {
             KeyBinding::new("escape", DismissTabMenu, Some("TabMenu")),
             KeyBinding::new("cmd-q", Quit, None),
             KeyBinding::new("cmd-w", CloseWindow, None),
+            KeyBinding::new("cmd-k", ClearTerminal, None),
+            KeyBinding::new("enter", settings::ApplyScrollback, Some("ScrollbackInput")),
             KeyBinding::new("escape", CloseWindow, Some("About")),
             KeyBinding::new("cmd-shift-w", CloseTab, None),
             KeyBinding::new("cmd-t", NewSession, None),

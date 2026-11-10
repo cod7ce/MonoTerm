@@ -344,6 +344,7 @@ pub fn block_terminal_actions(mut element: gpui::Stateful<gpui::Div>) -> gpui::S
         Box::new(crate::NewSession),
         Box::new(crate::CloseTab),
         Box::new(crate::CloseSession),
+        Box::new(crate::ClearTerminal),
         Box::new(crate::Restart),
         Box::new(crate::NextSession),
         Box::new(crate::PreviousSession),

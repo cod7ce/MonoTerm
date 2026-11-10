@@ -230,6 +230,7 @@ impl TerminalApp {
             &self.shell,
             &target.directory,
             self.typography.font(),
+            self.terminal_preferences.scrollback_lines,
             cx,
         );
         if let Some(view) = &session.view {

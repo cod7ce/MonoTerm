@@ -1177,6 +1177,7 @@ impl Render for HerdrWindow {
                 window.remove_window();
             }))
             .on_action(cx.listener(|view, _: &crate::CloseSession, _, cx| view.close_pane(cx)))
+            .on_action(cx.listener(|view, _: &crate::ClearTerminal, _, cx| view.clear_pane(cx)))
             .on_action(cx.listener(|view, _: &crate::CloseTab, _, cx| view.close_tab(cx)))
             .on_action(cx.listener(|view, _: &crate::CustomizeTab, window, cx| {
                 view.rename_focused_tab(window, cx)

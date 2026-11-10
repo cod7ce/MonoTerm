@@ -199,6 +199,7 @@ enum ShellMutation<'a> {
     SplitPane(&'a str, &'a str),
     ZoomPane(&'a str, bool),
     ClosePane(&'a str),
+    ClearPane(&'a str),
     CreateWorkspace,
     Workspace(&'a WorkspaceTarget, WorkspaceAction<'a>),
 }
@@ -311,7 +312,7 @@ impl ShellMutation<'_> {
                     json!({"pane_id": id, "mode": if *zoomed { "on" } else { "off" }}),
                 ))
             }
-            Self::SplitPane(id, _) | Self::ClosePane(id) => {
+            Self::SplitPane(id, _) | Self::ClosePane(id) | Self::ClearPane(id) => {
                 let pane = snapshot
                     .panes
                     .iter()
@@ -331,6 +332,7 @@ impl ShellMutation<'_> {
                         ))
                     }
                     Self::SplitPane(..) => Err("Unsupported pane split direction".into()),
+                    Self::ClearPane(_) => Ok((Method::PaneClear, json!({"pane_id": id}))),
                     _ => Ok((Method::PaneClose, json!({"pane_id": id}))),
                 }
             }
@@ -841,6 +843,10 @@ impl HerdrConnection {
         self.mutate_shell(ShellMutation::CloseTab(tab_id))
     }
 
+    pub fn clear_pane(&mut self, pane_id: &str) -> Result<(), String> {
+        self.mutate_shell(ShellMutation::ClearPane(pane_id))
+    }
+
     pub fn rename_tab(&mut self, target: &TabTarget, label: &str) -> Result<(), String> {
         self.mutate_shell(ShellMutation::RenameTab(target, label))
     }
@@ -1086,6 +1092,7 @@ impl HerdrConnection {
             ShellMutation::ZoomPane(_, true) => "Maximizing pane",
             ShellMutation::ZoomPane(_, false) => "Restoring pane",
             ShellMutation::ClosePane(_) => "Closing pane",
+            ShellMutation::ClearPane(_) => "Clearing pane",
             ShellMutation::CreateWorkspace => "Creating workspace",
             ShellMutation::Workspace(_, WorkspaceAction::NewTab) => "Creating tab",
             ShellMutation::Workspace(_, WorkspaceAction::Rename(_)) => "Renaming workspace",
@@ -1939,6 +1946,17 @@ mod tests {
     fn pane_mutations_capture_the_focused_pane_and_reject_stale_destinations() {
         let mut snapshot = (*snapshot()).clone();
         assert_eq!(
+            ShellMutation::ClearPane("w1:p1")
+                .request(&snapshot)
+                .unwrap(),
+            (Method::PaneClear, json!({"pane_id": "w1:p1"}))
+        );
+        assert!(
+            ShellMutation::ClearPane("missing")
+                .request(&snapshot)
+                .is_err()
+        );
+        assert_eq!(
             ShellMutation::SplitPane("w1:p1", "right")
                 .request(&snapshot)
                 .unwrap(),
@@ -1964,6 +1982,11 @@ mod tests {
                 .is_err()
         );
         snapshot.focused_pane_id = Some("w1:p2".into());
+        assert!(
+            ShellMutation::ClearPane("w1:p1")
+                .request(&snapshot)
+                .is_err()
+        );
         assert!(
             ShellMutation::ClosePane("w1:p1")
                 .request(&snapshot)
@@ -2323,6 +2346,7 @@ mod tests {
                 Method::PaneSplit,
             ),
             (ShellMutation::ClosePane("w1:p1"), Method::PaneClose),
+            (ShellMutation::ClearPane("w1:p1"), Method::PaneClear),
             (ShellMutation::CreateWorkspace, Method::WorkspaceCreate),
         ] {
             let mut owner = ready();
@@ -2360,6 +2384,7 @@ mod tests {
             ShellMutation::RenameTab(&tab, "new title"),
             ShellMutation::SplitPane("w1:p1", "down"),
             ShellMutation::ClosePane("w1:p1"),
+            ShellMutation::ClearPane("w1:p1"),
             ShellMutation::CreateWorkspace,
         ] {
             let mut owner = ready();
@@ -2425,6 +2450,7 @@ mod tests {
             ShellMutation::CloseTab("w1:t1"),
             ShellMutation::SplitPane("w1:p1", "down"),
             ShellMutation::ClosePane("w1:p1"),
+            ShellMutation::ClearPane("w1:p1"),
             ShellMutation::CreateWorkspace,
         ] {
             let mut owner = ready();

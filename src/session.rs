@@ -32,10 +32,18 @@ pub struct Session {
     input_error: Arc<Mutex<Option<String>>>,
     input_epoch: Arc<AtomicU64>,
     font: Font,
+    scrollback_lines: usize,
 }
 
 impl Session {
-    pub fn new(id: usize, shell: &str, directory: &Path, font: Font, cx: &mut App) -> Self {
+    pub fn new(
+        id: usize,
+        shell: &str,
+        directory: &Path,
+        font: Font,
+        scrollback_lines: usize,
+        cx: &mut App,
+    ) -> Self {
         let mut session = Self {
             id,
             directory: directory.to_path_buf(),
@@ -50,9 +58,19 @@ impl Session {
             input_error: Arc::new(Mutex::new(None)),
             input_epoch: Arc::new(AtomicU64::new(0)),
             font,
+            scrollback_lines,
         };
         session.start(shell, directory, cx);
         session
+    }
+
+    pub fn set_scrollback_lines(&mut self, lines: usize, cx: &mut App) -> Result<(), String> {
+        if let Some(view) = &self.view {
+            view.update(cx, |view, cx| view.set_scrollback_lines(lines, cx))
+                .map_err(|error| error.to_string())?;
+        }
+        self.scrollback_lines = lines;
+        Ok(())
     }
 
     pub fn set_font(&mut self, font: Font, cx: &mut App) {
@@ -100,6 +118,7 @@ impl Session {
     ) -> Result<(Entity<TerminalView>, PtyProcess), String> {
         let mut config = TerminalConfig {
             update_window_title: false,
+            scrollback_lines: self.scrollback_lines,
             ..Default::default()
         };
         config.default_bg.r = (ui::TERMINAL >> 16) as u8;

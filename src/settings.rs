@@ -15,7 +15,7 @@ use gpui::{
 };
 use std::collections::HashMap;
 
-actions!(settings, [CloseSettings]);
+actions!(settings, [CloseSettings, ApplyScrollback]);
 
 /// Only preferences belong here: terminal output must not redraw Settings.
 #[derive(Clone, PartialEq)]
@@ -24,6 +24,7 @@ pub(crate) struct SettingsSnapshot {
     palette: Palette,
     font_size: f32,
     font_family: String,
+    scrollback_lines: usize,
     language: Language,
     sidebar: bool,
     zen: bool,
@@ -40,6 +41,7 @@ impl From<&TerminalApp> for SettingsSnapshot {
             palette: root.palette,
             font_size: root.font_size,
             font_family: root.typography.font_family.clone(),
+            scrollback_lines: root.terminal_preferences.scrollback_lines,
             language: root.language,
             sidebar: root.sidebar,
             zen: root.zen,
@@ -63,6 +65,8 @@ enum Category {
 
 #[derive(Clone)]
 enum Change {
+    ApplyScrollback,
+    Scrollback(usize),
     Language(Language),
     Theme(Theme),
     Slider(Slider, f32),
@@ -132,6 +136,7 @@ pub(crate) struct SettingsWindow {
     material_error: Option<String>,
     local_feedback: Option<String>,
     font_search: Entity<TextInput>,
+    scrollback_input: Entity<TextInput>,
     font_query: String,
     show_all_fonts: bool,
     filtered_fonts: Vec<usize>,
@@ -159,6 +164,11 @@ impl SettingsWindow {
         let observation = cx.observe(&owner, |settings, entity, cx| {
             let snapshot = SettingsSnapshot::from(entity.read(cx));
             if settings.snapshot != snapshot {
+                if settings.snapshot.scrollback_lines != snapshot.scrollback_lines {
+                    settings.scrollback_input.update(cx, |input, cx| {
+                        input.set_value(snapshot.scrollback_lines.to_string(), cx);
+                    });
+                }
                 if settings.snapshot.font_family != snapshot.font_family {
                     settings.preview_family = None;
                 }
@@ -179,6 +189,8 @@ impl SettingsWindow {
         });
         let toast = crate::toast::new(window, snapshot.palette, cx);
         let updater_observation = cx.observe(&updater, |_, _, cx| cx.notify());
+        let scrollback_input =
+            cx.new(|cx| TextInput::new(snapshot.scrollback_lines.to_string(), "10000".into(), cx));
         let font_search = cx.new(|cx| {
             TextInput::new(
                 String::new(),
@@ -208,6 +220,7 @@ impl SettingsWindow {
             material_error: None,
             local_feedback: None,
             font_search,
+            scrollback_input,
             font_query: String::new(),
             show_all_fonts: false,
             filtered_fonts: filter_fonts(installed_fonts(), "", false),
@@ -242,6 +255,22 @@ impl SettingsWindow {
 
     fn change(&mut self, change: Change, cx: &mut Context<Self>) {
         self.local_feedback = None;
+        let change = if matches!(change, Change::ApplyScrollback) {
+            let input = self.scrollback_input.read(cx);
+            if input.has_marked_text() {
+                return;
+            }
+            match crate::terminal_preferences::parse_scrollback_lines(input.value()) {
+                Ok(lines) => Change::Scrollback(lines),
+                Err(error) => {
+                    self.local_feedback = Some(error.into());
+                    cx.notify();
+                    return;
+                }
+            }
+        } else {
+            change
+        };
         if matches!(change, Change::ShowAllFonts) {
             self.show_all_fonts = !self.show_all_fonts;
             self.filter_font_list(cx);
@@ -269,6 +298,10 @@ impl SettingsWindow {
                               terminal_window: &mut Window,
                               cx: &mut Context<TerminalApp>| {
                 match change {
+                    Change::Scrollback(lines) => {
+                        root.set_scrollback_lines(lines, cx);
+                        return;
+                    }
                     Change::Language(language) => {
                         root.set_language(language, cx);
                         return;
@@ -1184,7 +1217,27 @@ impl SettingsWindow {
             .flex()
             .flex_col()
             .gap(px(16.0))
-            .child(self.heading("Terminal", "Comfortable type, with a preview at the actual size."))
+            .child(self.heading("Terminal", "Terminal history and text appearance."))
+            .child(
+                self.card().child(
+                    self.row(72.0, false)
+                        .child(self.row_label("Scrollback lines", "Default 10000 · 0 means unlimited"))
+                        .child(
+                            div()
+                                .key_context("ScrollbackInput")
+                                .w(px(110.0))
+                                .px(px(8.0))
+                                .rounded(px(6.0))
+                                .border_1()
+                                .border_color(rgb(p.border))
+                                .child(self.scrollback_input.clone()),
+                        )
+                        .child(self.text_button(
+                            "apply-scrollback", "Apply", Change::ApplyScrollback, cx,
+                        )),
+                ),
+            )
+            .child(self.description("Applies immediately to local panes. Herdr history is managed by its daemon."))
             .child(self.card()
                 .child(self.row(64.0, true)
                     .child(self.row_label("Font size", "10–28 px · default 14 px"))
@@ -1308,6 +1361,7 @@ impl SettingsWindow {
                     ("Increase / decrease font", "⌘+ / ⌘−"),
                     ("Reset font size to 14 px", "⌘0"),
                     ("Copy / paste", "⌘C / ⌘V"),
+                    ("Clear Terminal", "⌘K"),
                     ("Select all", "⌘A"),
                     ("Open settings", "⌘,"),
                 ],
@@ -1730,6 +1784,9 @@ impl Render for SettingsWindow {
             .on_action(
                 cx.listener(|settings, _: &CloseSettings, window, cx| settings.close(window, cx)),
             )
+            .on_action(cx.listener(|settings, _: &ApplyScrollback, _, cx| {
+                settings.change(Change::ApplyScrollback, cx);
+            }))
             .on_action(
                 cx.listener(|settings, _: &CloseWindow, window, cx| settings.close(window, cx)),
             )
