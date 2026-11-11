@@ -1,8 +1,8 @@
-# MonoTerm
+# MonoTerm · ONES
 
 A native macOS terminal built with Rust, GPUI and Ghostty. Each local pane owns a real PTY; Ghostty handles terminal state and GPUI renders the terminal and application.
 
-**当前版本：0.3.4。** 适用于 Apple Silicon Mac，要求 macOS 14 或更高版本。
+**当前版本：0.3.5。** 适用于 Apple Silicon Mac，要求 macOS 14 或更高版本。
 
 ## Features
 
@@ -19,7 +19,7 @@ A native macOS terminal built with Rust, GPUI and Ghostty. Each local pane owns 
 
 ## Download and updates
 
-在应用菜单中选择 **MonoTerm → 关于 MonoTerm**，可查看应用简介、当前版本、运行平台和构建技术，并打开 GitHub 项目或版本下载页面。版本号直接读取构建元数据，与发布版本保持一致；关于窗口支持中英文界面以及浅色、深色主题。
+在应用菜单中选择 **MonoTerm · ONES → 关于 MonoTerm · ONES**，可查看应用简介、当前版本、运行平台和构建技术，并打开 GitHub 项目或版本下载页面。版本号直接读取构建元数据，与发布版本保持一致；关于窗口支持中英文界面以及浅色、深色主题。
 
 Download application packages from [Releases](https://github.com/cod7ce/MonoTerm/releases).
 Open **Settings → Version** to check for updates or view release downloads.
@@ -34,7 +34,7 @@ Requires Apple Silicon macOS, Rust/Cargo, Git, curl, Python 3.11 or later and Xc
 ```sh
 ./scripts/bootstrap.sh
 bash scripts/build-app.sh
-open target/MonoTerm.app
+open 'target/MonoTerm · ONES.app'
 ```
 
 To start in a specific working directory:
@@ -44,6 +44,8 @@ To start in a specific working directory:
 ```
 
 Bootstrap downloads pinned dependencies and Zig into this checkout. It applies the maintained [terminal patch](patches/README.md) without discarding existing local changes. Build output and tools remain under `target/` and `.tools/`; nothing is installed globally. The first build can take several minutes. Sparkle is fetched from its official release with a pinned checksum.
+
+应用名称为 **MonoTerm · ONES**，开发版和发布版分别输出到 `target/MonoTerm · ONES.app`、`dist/MonoTerm · ONES.app`，包内可执行文件也使用此名称。配置目录仍为 `~/Library/Application Support/MonoTerm/`，应用标识、更新源及签名密钥延续现有值，已有偏好无需迁移。仓库名、Cargo 包名和 `MONOTERM_*` 环境变量保持兼容；历史 Release 的文件名保持发布时的名称。
 
 The app bundle contains its runtime resources and framework. Cargo, Zig and the source tree are not needed to run a packaged application. Locally signed builds use ad-hoc signing; this project does not currently provide Apple notarization.
 
@@ -94,7 +96,7 @@ Cmd-hover underlines HTTP/HTTPS links and shows their destination; Cmd-click ope
 
 The Herdr button enables local companion following. Settings → Integrations controls the source socket and whether a separate Herdr window opens automatically. The Herdr window paints the daemon's cell surface; local tabs remain real MonoTerm PTYs.
 
-主窗口、Herdr 窗口和设置窗口可以独立关闭。关闭主窗口会终止其中的本地 shell，Herdr 的连接、输入、输出和偏好设置不受影响。关闭 Herdr 窗口只解除界面连接，不会停止守护进程中的终端或本地 shell。“视图 → 返回本地终端”可重新打开主窗口。禁用跟随只影响本地伴随终端；手动打开 Herdr 窗口不会启用跟随。切换连接来源会在现有 Herdr 窗口中重新连接。关闭最后一个窗口后，MonoTerm 继续运行；点击 Dock 图标或选择“新建标签页”可重新打开主窗口。Cmd-Q 或“退出 MonoTerm”才会退出整个应用。
+主窗口、Herdr 窗口和设置窗口可以独立关闭。关闭主窗口会终止其中的本地 shell，Herdr 的连接、输入、输出和偏好设置不受影响。关闭 Herdr 窗口只解除界面连接，不会停止守护进程中的终端或本地 shell。“视图 → 返回本地终端”可重新打开主窗口。禁用跟随只影响本地伴随终端；手动打开 Herdr 窗口不会启用跟随。切换连接来源会在现有 Herdr 窗口中重新连接。关闭最后一个窗口后，MonoTerm · ONES 继续运行；点击 Dock 图标或选择“新建标签页”可重新打开主窗口。Cmd-Q 或“退出 MonoTerm · ONES”才会退出整个应用。
 
 Following respects manual tab selection, verified process identities, idle-shell checks and connection/input fences. Clicking panes or resizing splits does not pin following. Custom tab titles and icons belong to the tab until it closes.
 

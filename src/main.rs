@@ -26,6 +26,8 @@ mod window_chrome;
 mod window_preferences;
 mod window_style;
 
+pub(crate) const APP_NAME: &str = "MonoTerm · ONES";
+
 use appearance::{Appearance, Palette};
 use gpui::{
     App, Application, Bounds, Context, KeyBinding, Menu, MenuItem, MouseButton, OsAction, Pixels,
@@ -1709,7 +1711,7 @@ impl TerminalApp {
                 cx,
             ))),
             titlebar: Some(TitlebarOptions {
-                title: Some("MonoTerm Settings".into()),
+                title: Some(self.language.text("MonoTerm · ONES Settings").into()),
                 appears_transparent: true,
                 traffic_light_position: Some(point(px(12.0), px(14.0))),
             }),
@@ -1762,7 +1764,7 @@ impl Render for TerminalApp {
             .get(self.active)
             .map(|tab| {
                 format!(
-                    "{} — MonoTerm",
+                    "{} — {APP_NAME}",
                     tab.appearance.title.clone().unwrap_or_else(|| {
                         if self.follow_controller.is_companion(tab.id) {
                             self.default_tab_label(tab)
@@ -1772,7 +1774,7 @@ impl Render for TerminalApp {
                     })
                 )
             })
-            .unwrap_or_else(|| "MonoTerm".into());
+            .unwrap_or_else(|| APP_NAME.into());
         if window.window_title() != title {
             window.set_window_title(&title);
         }
@@ -2156,15 +2158,15 @@ fn set_menus(language: locale::Language, cx: &mut App) {
     let t = |text| language.text(text);
     cx.set_menus(vec![
         Menu {
-            name: "MonoTerm".into(),
+            name: APP_NAME.into(),
             items: vec![
-                MenuItem::action(t("About MonoTerm"), OpenAbout),
+                MenuItem::action(t("About MonoTerm · ONES"), OpenAbout),
                 MenuItem::separator(),
                 MenuItem::action(t("New Tab"), NewSession),
                 MenuItem::action(t("Close Window"), CloseWindow),
                 MenuItem::separator(),
                 MenuItem::action(t("Settings"), ToggleSettings),
-                MenuItem::action(t("Quit MonoTerm"), Quit),
+                MenuItem::action(t("Quit MonoTerm · ONES"), Quit),
             ],
         },
         Menu {
@@ -2214,7 +2216,7 @@ fn main_window_options(cx: &App) -> WindowOptions {
             cx,
         ))),
         titlebar: Some(TitlebarOptions {
-            title: Some("MonoTerm".into()),
+            title: Some(APP_NAME.into()),
             appears_transparent: true,
             traffic_light_position: Some(point(px(12.0), px(15.0))),
         }),

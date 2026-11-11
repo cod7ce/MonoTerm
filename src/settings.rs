@@ -1380,7 +1380,7 @@ impl SettingsWindow {
                 &[
                     ("Close Window", "⌘W"),
                     ("Close settings", "Esc / ⌘W / ⌘⇧W"),
-                    ("Quit MonoTerm", "⌘Q"),
+                    ("Quit MonoTerm · ONES", "⌘Q"),
                 ],
             ))
     }
@@ -1473,7 +1473,7 @@ impl SettingsWindow {
                                     div()
                                         .text_size(px(18.0))
                                         .font_weight(FontWeight::SEMIBOLD)
-                                        .child("MonoTerm"),
+                                        .child(crate::APP_NAME),
                                 )
                                 .child(self.description(format!("{} {VERSION}", self.t("Version"))))
                                 .child(self.description("Native macOS terminal · GPUI + Ghostty")),
@@ -1542,7 +1542,7 @@ impl SettingsWindow {
                     ),
             )
             .child(self.description("Updates are checked manually and verified with Sparkle. Automatic checks and background downloads are off."))
-            .child(self.description("Installing an update restarts MonoTerm and closes local terminal sessions. Finish running jobs first. Herdr sessions keep running."))
+            .child(self.description("Installing an update restarts MonoTerm · ONES and closes local terminal sessions. Finish running jobs first. Herdr sessions keep running."))
     }
 
     fn category_tabs(&self, cx: &mut Context<Self>) -> gpui::Div {
@@ -1739,7 +1739,7 @@ impl Render for SettingsWindow {
             .appearance
             .palette(TerminalApp::system_dark(window));
         self.snapshot.palette = p;
-        window.set_window_title(self.t("MonoTerm Settings"));
+        window.set_window_title(self.t("MonoTerm · ONES Settings"));
         let material = (p.alpha, self.snapshot.appearance.blur_radius);
         if self.applied_material != Some(material) {
             self.material_error =

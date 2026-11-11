@@ -35,7 +35,7 @@ pub(crate) fn open(cx: &mut App) {
                 cx,
             ))),
             titlebar: Some(TitlebarOptions {
-                title: Some(owner.read(cx).language.text("About MonoTerm").into()),
+                title: Some(owner.read(cx).language.text("About MonoTerm · ONES").into()),
                 appears_transparent: true,
                 ..Default::default()
             }),
@@ -47,7 +47,7 @@ pub(crate) fn open(cx: &mut App) {
     );
     match result {
         Ok(window) => cx.global_mut::<ApplicationState>().about_window = Some(window),
-        Err(error) => eprintln!("Open About MonoTerm: {error}"),
+        Err(error) => eprintln!("Open About {}: {error}", crate::APP_NAME),
     }
 }
 
@@ -109,7 +109,7 @@ impl AboutWindow {
 impl Render for AboutWindow {
     fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         let palette = self.appearance.palette(TerminalApp::system_dark(window));
-        let title = self.language.text("About MonoTerm");
+        let title = self.language.text("About MonoTerm · ONES");
         window.set_window_title(title);
         let architecture = match std::env::consts::ARCH {
             "aarch64" => "Apple Silicon",
@@ -169,7 +169,7 @@ impl Render for AboutWindow {
                                 div()
                                     .text_size(px(24.0))
                                     .font_weight(FontWeight::SEMIBOLD)
-                                    .child("MonoTerm"),
+                                    .child(crate::APP_NAME),
                             )
                             .child(
                                 div()

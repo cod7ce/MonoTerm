@@ -2,4 +2,6 @@
 set -euo pipefail
 project_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 bash "$project_dir/scripts/build-app.sh"
-exec "$project_dir/target/MonoTerm.app/Contents/MacOS/MonoTerm" "$@"
+app_name="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleName' "$project_dir/scripts/Info.plist")"
+executable="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$project_dir/scripts/Info.plist")"
+exec "$project_dir/target/$app_name.app/Contents/MacOS/$executable" "$@"

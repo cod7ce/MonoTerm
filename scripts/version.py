@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate MonoTerm's update metadata and print its Cargo package version."""
+"""校验 MonoTerm · ONES 的应用与更新元数据，并输出 Cargo 版本号。"""
 
 import argparse
 import base64
@@ -13,6 +13,7 @@ import tomllib
 ROOT = Path(__file__).resolve().parent.parent
 FEED_URL = "https://github.com/cod7ce/MonoTerm/releases/latest/download/appcast.xml"
 BUNDLE_ID = "local.monoterm.app"
+APP_NAME = "MonoTerm · ONES"
 
 
 def fail(message):
@@ -51,7 +52,9 @@ def main():
         "CFBundleShortVersionString": version,
         "CFBundleVersion": version,
         "CFBundleIdentifier": BUNDLE_ID,
-        "CFBundleExecutable": "MonoTerm",
+        "CFBundleExecutable": APP_NAME,
+        "CFBundleName": APP_NAME,
+        "CFBundleDisplayName": APP_NAME,
         "SUFeedURL": FEED_URL,
         "LSMinimumSystemVersion": "14.0",
         "SUEnableAutomaticChecks": False,

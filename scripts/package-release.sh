@@ -73,9 +73,11 @@ fi
 if [[ "${2:-}" != --skip-build ]]; then
   bash "$ROOT/scripts/build-app.sh" release
 fi
-APP="$ROOT/dist/MonoTerm.app"
+APP_NAME="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleName' "$ROOT/scripts/Info.plist")"
+EXECUTABLE="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$ROOT/scripts/Info.plist")"
+APP="$ROOT/dist/$APP_NAME.app"
 python3 -I "$ROOT/scripts/version.py" --release --bundle "$APP" >/dev/null
-if [[ ! -x "$APP/Contents/MacOS/MonoTerm" || ! -f "$APP/Contents/Resources/SPARKLE-LICENSE.txt" ]]; then
+if [[ ! -x "$APP/Contents/MacOS/$EXECUTABLE" || ! -f "$APP/Contents/Resources/SPARKLE-LICENSE.txt" ]]; then
   printf '%s\n' 'The release bundle is missing its executable or Sparkle license.' >&2
   exit 1
 fi
@@ -109,7 +111,7 @@ done < <(find "$APP" -type f -print0)
 codesign --verify --deep --strict "$APP"
 
 WORK="$(mktemp -d "$RELEASE_ROOT/.package.XXXXXX")"
-ARCHIVE_NAME="MonoTerm-$VERSION-arm64.zip"
+ARCHIVE_NAME="MonoTerm-ONES-$VERSION-arm64.zip"
 ARCHIVE="$WORK/$ARCHIVE_NAME"
 /usr/bin/ditto -c -k --sequesterRsrc --keepParent "$APP" "$ARCHIVE"
 # Sign the archive bytes using repository code, never a downloaded executable.
@@ -140,12 +142,12 @@ sparkle = "http://www.andymatuschak.org/xml-namespaces/sparkle"
 ET.register_namespace("sparkle", sparkle)
 rss = ET.Element("rss", {"version": "2.0"})
 channel = ET.SubElement(rss, "channel")
-ET.SubElement(channel, "title").text = "MonoTerm Updates"
+ET.SubElement(channel, "title").text = f"{info['CFBundleDisplayName']} Updates"
 ET.SubElement(channel, "link").text = info["SUFeedURL"]
-ET.SubElement(channel, "description").text = "MonoTerm for Apple Silicon Macs"
+ET.SubElement(channel, "description").text = f"{info['CFBundleDisplayName']} for Apple Silicon Macs"
 ET.SubElement(channel, "language").text = "en"
 item = ET.SubElement(channel, "item")
-ET.SubElement(item, "title").text = f"MonoTerm {info['CFBundleShortVersionString']}"
+ET.SubElement(item, "title").text = f"{info['CFBundleDisplayName']} {info['CFBundleShortVersionString']}"
 ET.SubElement(item, "pubDate").text = email.utils.format_datetime(datetime.datetime.now(datetime.timezone.utc))
 ET.SubElement(item, f"{{{sparkle}}}version").text = info["CFBundleVersion"]
 ET.SubElement(item, f"{{{sparkle}}}shortVersionString").text = info["CFBundleShortVersionString"]

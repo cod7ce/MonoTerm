@@ -171,8 +171,8 @@ fn chinese(english: &str) -> Option<&'static str> {
     Some(match english {
         // Settings categories and shared controls.
         "Settings" => "设置",
-        "MonoTerm Settings" => "MonoTerm 设置",
-        "About MonoTerm" => "关于 MonoTerm",
+        "MonoTerm · ONES Settings" => "MonoTerm · ONES 设置",
+        "About MonoTerm · ONES" => "关于 MonoTerm · ONES",
         "A native macOS terminal for focused work." => "为专注工作打造的原生 macOS 终端。",
         "Platform" => "运行平台",
         "Built with" => "构建技术",
@@ -216,8 +216,8 @@ fn chinese(english: &str) -> Option<&'static str> {
         "Updates are checked manually and verified with Sparkle. Automatic checks and background downloads are off." => {
             "通过 Sparkle 手动检查更新并验证更新包签名。自动检查与后台下载默认关闭。"
         }
-        "Installing an update restarts MonoTerm and closes local terminal sessions. Finish running jobs first. Herdr sessions keep running." => {
-            "安装更新会重启 MonoTerm 并关闭本地终端会话，请先完成正在运行的任务。Herdr 会话会继续运行。"
+        "Installing an update restarts MonoTerm · ONES and closes local terminal sessions. Finish running jobs first. Herdr sessions keep running." => {
+            "安装更新会重启 MonoTerm · ONES 并关闭本地终端会话，请先完成正在运行的任务。Herdr 会话会继续运行。"
         }
         "On" => "开",
         "Off" => "关",
@@ -375,7 +375,7 @@ fn chinese(english: &str) -> Option<&'static str> {
         "Application" => "应用",
         "Open settings" => "打开设置",
         "Close settings" => "关闭设置",
-        "Quit MonoTerm" => "退出 MonoTerm",
+        "Quit MonoTerm · ONES" => "退出 MonoTerm · ONES",
         "Edit" => "编辑",
         "Copy" => "复制",
         "Paste" => "粘贴",
@@ -477,7 +477,7 @@ fn chinese(english: &str) -> Option<&'static str> {
         "Restore default" => "恢复默认",
         "Leave blank to use the automatic title." => "留空以使用自动标题。",
         "Applies to this tab for the current session." => "应用于此标签页，仅本次会话有效。",
-        "MonoTerm · Local workspace" => "MonoTerm · 本地工作区",
+        "MonoTerm · ONES · Local workspace" => "MonoTerm · ONES · 本地工作区",
         "Pane" => "窗格",
         "Pane {id}" => "窗格 {id}",
         "{} pane{}" => "{} 个窗格{}",
@@ -489,7 +489,7 @@ fn chinese(english: &str) -> Option<&'static str> {
             "已达上限：每个标签页 8 个窗格／共 48 个窗格。"
         }
         "Close a tab before opening another workspace." => "请先关闭一个标签页，再打开其他工作区。",
-        "Herdr agents — MonoTerm" => "Herdr 智能体 — MonoTerm",
+        "Herdr agents — MonoTerm · ONES" => "Herdr 智能体 — MonoTerm · ONES",
         "Herdr agents" => "Herdr 智能体",
         "new" => "新建",
         "menu" => "菜单",
@@ -662,7 +662,7 @@ mod tests {
         );
         let unknown = String::from("new diagnostic: /tmp/Settings");
         assert_eq!(Language::Chinese.dynamic_text(&unknown), unknown);
-        assert_eq!(Language::Chinese.text("MonoTerm"), "MonoTerm");
+        assert_eq!(Language::Chinese.text(crate::APP_NAME), crate::APP_NAME);
         // Sidebar section headings and the view menu keep Herdr's product terms.
         for term in ["SPACES", "AGENTS", "Spaces", "Agents", "Spaces and Agents"] {
             assert_eq!(Language::Chinese.text(term), term);

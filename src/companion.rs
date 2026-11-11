@@ -337,7 +337,7 @@ impl TerminalApp {
                 cx,
             ))),
             titlebar: Some(TitlebarOptions {
-                title: Some("Herdr — MonoTerm".into()),
+                title: Some(format!("Herdr — {}", crate::APP_NAME).into()),
                 appears_transparent: true,
                 traffic_light_position: Some(point(px(12.0), px(15.0))),
             }),

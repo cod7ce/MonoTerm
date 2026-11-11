@@ -9,7 +9,7 @@ if [[ "$#" -gt 1 || ( "$PROFILE" != debug && "$PROFILE" != release ) ]]; then
 fi
 cd "$ROOT"
 if [[ "$(uname -s)" != Darwin || "$(uname -m)" != arm64 ]]; then
-  printf '%s\n' 'MonoTerm bundles currently require an Apple Silicon Mac.' >&2
+  printf '%s\n' 'MonoTerm · ONES bundles currently require an Apple Silicon Mac.' >&2
   exit 1
 fi
 if [[ -n "${CARGO_BUILD_TARGET:-}" ]]; then
@@ -24,6 +24,8 @@ if [[ ! -x .tools/zig-0.17.0/zig || ! -f vendor/zed/crates/gpui/Cargo.toml ]]; t
 fi
 # Cargo is authoritative; a local bundle may have no update key configured yet.
 python3 -I "$ROOT/scripts/version.py" >/dev/null
+APP_NAME="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleName' "$ROOT/scripts/Info.plist")"
+EXECUTABLE="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$ROOT/scripts/Info.plist")"
 SPARKLE_SDK="$(bash "$ROOT/scripts/fetch-sparkle.sh")"
 export SPARKLE_SDK
 CARGO_ARGS=(build --locked --package monoterm --manifest-path "$ROOT/Cargo.toml" --target-dir "$ROOT/target")
@@ -37,7 +39,7 @@ cargo "${CARGO_ARGS[@]}"
 
 mkdir -p "$OUTPUT_DIR"
 STAGING="$(mktemp -d "$OUTPUT_DIR/.bundle.XXXXXX")"
-DESTINATION="$OUTPUT_DIR/MonoTerm.app"
+DESTINATION="$OUTPUT_DIR/$APP_NAME.app"
 PREVIOUS="$STAGING/previous.app"
 cleanup() {
   # Restore the prior bundle if publication failed after moving it aside.
@@ -47,12 +49,12 @@ cleanup() {
   rm -rf "$STAGING"
 }
 trap cleanup EXIT
-APP="$STAGING/MonoTerm.app"
+APP="$STAGING/$APP_NAME.app"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Frameworks" \
   "$APP/Contents/Resources/licenses/herdr" "$APP/Contents/Resources/licenses/ghostty" \
   "$APP/Contents/Resources/licenses/gpui-ghostty" "$APP/Contents/Resources/licenses/gpui"
-cp "$ROOT/target/$PROFILE/monoterm" "$APP/Contents/MacOS/MonoTerm"
-chmod 755 "$APP/Contents/MacOS/MonoTerm"
+cp "$ROOT/target/$PROFILE/monoterm" "$APP/Contents/MacOS/$EXECUTABLE"
+chmod 755 "$APP/Contents/MacOS/$EXECUTABLE"
 cp "$ROOT/scripts/Info.plist" "$APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Add :MonoTermBuildProfile string $PROFILE" "$APP/Contents/Info.plist"
 cp "$ROOT/assets/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
@@ -69,8 +71,8 @@ fi
 # Keep framework symlinks intact and never modify the SDK input.
 /usr/bin/ditto "$SPARKLE_SDK/Sparkle.framework" "$APP/Contents/Frameworks/Sparkle.framework"
 cp "$SPARKLE_SDK/LICENSE" "$APP/Contents/Resources/SPARKLE-LICENSE.txt"
-if [[ "$(xcrun lipo -archs "$APP/Contents/MacOS/MonoTerm")" != arm64 ]]; then
-  printf '%s\n' 'Expected an arm64-only MonoTerm executable.' >&2
+if [[ "$(xcrun lipo -archs "$APP/Contents/MacOS/$EXECUTABLE")" != arm64 ]]; then
+  printf '%s\n' 'Expected an arm64-only MonoTerm · ONES executable.' >&2
   exit 1
 fi
 
@@ -137,6 +139,6 @@ mv "$APP" "$DESTINATION"
 touch "$DESTINATION"
 LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
 if [[ -x "$LSREGISTER" ]]; then
-  "$LSREGISTER" -f "$DESTINATION" || printf '%s\n' 'Could not refresh the MonoTerm application registration.' >&2
+  "$LSREGISTER" -f "$DESTINATION" || printf '%s\n' 'Could not refresh the MonoTerm · ONES application registration.' >&2
 fi
 printf '%s\n' "Built: $DESTINATION ($PROFILE, arm64, signing identity: ${CODE_SIGN_IDENTITY:--})"
