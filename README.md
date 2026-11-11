@@ -84,6 +84,10 @@ Local limits are 12 tabs, 8 panes per tab and 48 panes total. Closing a pane ter
 
 “设置 → 终端 → 历史记录行数”可以配置本地终端的回滚历史，默认 10000 行，设为 0 时不限制。点击“应用”或在输入框中按回车后立即生效，并保存到 `terminal.json`；现有窗格、新建窗格和重启后的本地终端均使用该设置。Ghostty 按内存页回收历史，因此实际保留行数会在设定值附近浮动；减小上限时，较早的历史可能立即被移除。Herdr 历史上限由其守护进程管理。
 
+“设置 → 终端 → 打开终端的默认目录”支持绝对路径或 `~/` 开头的路径，留空时使用 home 目录。点击“应用”或按回车后保存到 `terminal.json`，之后新建的标签页和下次启动的终端使用该目录；不会改变已有 shell 的目录。启动时显式传入的目录参数优先于设置，已保存目录被删除或不可用时回退到 home 并显示提示。
+
+新建本地标签页始终使用设置中的默认目录，未设置时使用 home。新建分屏则读取当前活动 shell 的实际工作目录。例如在 home 中执行 `cd ABC` 后，新建分屏会打开 ABC，新建标签页仍打开默认目录。分屏读取目录失败时优先使用该会话的启动目录，仍不可用则使用默认目录或 home。Herdr 窗口中的远端窗格由守护进程管理。
+
 `⌘K` 或“编辑 → 清空终端”清空当前活动窗格的画面和回滚历史，不重启 shell，也不影响其他窗格。Herdr 窗口通过守护进程的 `pane.clear` 执行同一操作，需要所连接的守护进程支持此接口。
 
 Font family and size are shared and saved automatically (Menlo, 14px by default; 10–28px). Settings → Terminal searches installed fonts, initially filters to monospace families, and previews English, CJK, code, Nerd symbols and emoji. Show all fonts includes proportional families, which still occupy terminal grid cells. Missing fonts temporarily use Menlo while retaining the chosen name. Install/uninstall font changes are detected after restarting MonoTerm. Settings itself keeps the system font.

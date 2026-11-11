@@ -18,6 +18,7 @@ pub struct PtyProcess {
     input: Option<SyncSender<Vec<u8>>>,
     pub output: Receiver<Output>,
     pub pid: Option<u32>,
+    identity: Option<crate::process_monitor::ProcessIdentity>,
 }
 
 impl PtyProcess {
@@ -58,6 +59,7 @@ impl PtyProcess {
             .map_err(|e| e.to_string())?;
         drop(pair.slave);
         let pid = child.process_id();
+        let identity = pid.and_then(|pid| crate::process_monitor::process_identity(pid).ok());
         let (output_tx, output) = mpsc::sync_channel(64);
         let (input_tx, input_rx) = mpsc::sync_channel::<Vec<u8>>(64);
         let process = Self {
@@ -66,6 +68,7 @@ impl PtyProcess {
             input: Some(input_tx),
             output,
             pid,
+            identity,
         };
         let reader_tx = output_tx.clone();
         thread::Builder::new()
@@ -116,6 +119,14 @@ impl PtyProcess {
 
     pub fn input_sender(&self) -> Result<SyncSender<Vec<u8>>, String> {
         self.input.clone().ok_or_else(|| "Session is closed".into())
+    }
+
+    pub fn current_directory(&self) -> Result<std::path::PathBuf, String> {
+        let identity = self
+            .identity
+            .as_ref()
+            .ok_or("shell process identity is unavailable")?;
+        crate::process_monitor::process_directory(identity)
     }
 
     #[cfg(test)]
@@ -245,5 +256,61 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(3));
         assert!(process.child.is_none());
         assert!(process.send(b"x").is_err());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn shell_directory_tracks_cd_and_can_be_inherited_by_another_pty() {
+        let directory = std::env::temp_dir().join(format!(
+            "monoterm cwd 中文 {}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let directory = directory.canonicalize().unwrap();
+        let size = PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        };
+        let mut parent = PtyProcess::spawn(
+            "/bin/sh",
+            &[
+                "-c",
+                "IFS= read -r target; cd \"$target\" || exit 1; printf 'CWD_READY\\n'; read stop",
+            ],
+            Path::new("/"),
+            size,
+        )
+        .unwrap();
+        assert_eq!(parent.current_directory().unwrap(), Path::new("/"));
+        parent
+            .send(format!("{}\n", directory.display()).as_bytes())
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut output = Vec::new();
+        while Instant::now() < deadline {
+            if let Ok(Output::Bytes(bytes)) = parent.output.recv_timeout(Duration::from_millis(100))
+            {
+                output.extend(bytes);
+                if String::from_utf8_lossy(&output).contains("CWD_READY") {
+                    break;
+                }
+            }
+        }
+        assert!(String::from_utf8_lossy(&output).contains("CWD_READY"));
+        let inherited = parent.current_directory().unwrap();
+        assert_eq!(inherited, directory);
+        let mut child =
+            PtyProcess::spawn("/bin/sh", &["-c", "read stop"], &inherited, size).unwrap();
+        assert_eq!(child.current_directory().unwrap(), directory);
+        child.shutdown();
+        parent.shutdown();
+        assert!(parent.current_directory().is_err());
+        std::fs::remove_dir(directory).unwrap();
     }
 }

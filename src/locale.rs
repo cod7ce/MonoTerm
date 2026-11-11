@@ -181,7 +181,22 @@ fn chinese(english: &str) -> Option<&'static str> {
         "Window" => "窗口",
         "Terminal" => "终端",
         "Scrollback lines" => "历史记录行数",
-        "Terminal history and text appearance." => "设置终端历史记录和文字显示。",
+        "Startup directory, terminal history and text appearance." => {
+            "设置启动目录、终端历史记录和文字显示。"
+        }
+        "Default working directory" => "打开终端的默认目录",
+        "Leave blank to open your home directory." => "留空时默认打开 home 目录。",
+        "New tabs use the default directory. New panes follow the active shell's current directory. Changing this setting does not move existing shells." => {
+            "新标签页使用默认目录，新分屏跟随当前 shell 的实际目录。修改此设置不会改变已有终端的目录。"
+        }
+        "Enter an absolute directory or a path starting with ~/." => {
+            "请输入绝对目录路径或以 ~/ 开头的路径。"
+        }
+        "Choose an existing, accessible directory." => "请选择存在且可访问的目录。",
+        "Could not find the home directory." => "无法找到 home 目录。",
+        "The default directory is unavailable. Opened the home directory." => {
+            "默认目录不可用，已打开 home 目录。"
+        }
         "Default 10000 · 0 means unlimited" => "默认 10000 行 · 0 表示不限制",
         "Applies immediately to local panes. Herdr history is managed by its daemon." => {
             "立即应用到本地终端窗格。Herdr 的历史记录由其守护进程管理。"

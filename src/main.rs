@@ -100,7 +100,6 @@ struct TerminalApp {
     tabs: Vec<Tab>,
     active: usize,
     next_id: usize,
-    default_directory: PathBuf,
     /// Active pane's starting directory, also used for the default native title.
     directory: PathBuf,
     shell: String,
@@ -147,7 +146,13 @@ struct TerminalApp {
 }
 
 impl TerminalApp {
-    fn new(directory: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(
+        directory: PathBuf,
+        terminal_preferences: terminal_preferences::TerminalPreferences,
+        terminal_notice: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         Self::register_main_close(window, cx);
         let output_task = cx.spawn(async move |root, cx| {
             loop {
@@ -204,8 +209,6 @@ impl TerminalApp {
         let (appearance, notice) = Appearance::load();
         let (language, language_notice) = locale::Language::load();
         let (typography, typography_notice) = typography::Typography::load();
-        let (terminal_preferences, terminal_notice) =
-            terminal_preferences::TerminalPreferences::load();
         let typography_notice = typography_notice.or_else(|| typography.missing_font_notice());
         let (window_preferences, window_notice) = window_preferences::WindowPreferences::load();
         set_menus(language, cx);
@@ -230,7 +233,6 @@ impl TerminalApp {
             tabs: Vec::new(),
             active: 0,
             next_id: 1,
-            default_directory: directory.clone(),
             directory,
             shell,
             font_size: typography.font_size,
@@ -279,7 +281,7 @@ impl TerminalApp {
             _appearance_subscription: appearance_subscription,
         };
         if !root.follow_settings.enabled {
-            root.new_session(window, cx);
+            root.new_session_in(root.directory.clone(), window, cx);
         } else {
             root.root_focus.focus(window, cx);
         }
@@ -403,12 +405,34 @@ impl TerminalApp {
         if !self.prepare_terminal_action(cx) {
             return;
         }
-        let directory = self
-            .active_session()
-            .map(|session| &session.directory)
-            .unwrap_or(&self.default_directory)
-            .clone();
+        let Some(directory) = self.default_terminal_directory(cx) else {
+            return;
+        };
         self.new_session_in(directory, window, cx);
+    }
+
+    fn new_pane_directory(&mut self, cx: &mut Context<Self>) -> Option<PathBuf> {
+        if let Some(directory) = self.active_session().and_then(Session::current_directory) {
+            return Some(directory);
+        }
+        self.default_terminal_directory(cx)
+    }
+
+    fn default_terminal_directory(&mut self, cx: &mut Context<Self>) -> Option<PathBuf> {
+        match self.terminal_preferences.startup_directory(None) {
+            Ok((directory, notice)) => {
+                if notice.is_some() {
+                    self.appearance_notice = notice;
+                    cx.notify();
+                }
+                Some(directory)
+            }
+            Err(error) => {
+                self.notice = Some(error);
+                cx.notify();
+                None
+            }
+        }
     }
 
     fn new_session_in(&mut self, directory: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
@@ -490,6 +514,9 @@ impl TerminalApp {
         if !self.prepare_terminal_action(cx) {
             return;
         }
+        let Some(directory) = self.new_pane_directory(cx) else {
+            return;
+        };
         self.mark_local_edit();
         let Some(tab) = self.tabs.get_mut(self.active) else {
             return;
@@ -505,7 +532,7 @@ impl TerminalApp {
             self.sessions.push(Session::new(
                 id,
                 &self.shell,
-                &self.directory,
+                &directory,
                 self.typography.font(),
                 self.terminal_preferences.scrollback_lines,
                 cx,
@@ -517,6 +544,7 @@ impl TerminalApp {
     fn set_scrollback_lines(&mut self, lines: usize, cx: &mut Context<Self>) {
         let preferences = terminal_preferences::TerminalPreferences {
             scrollback_lines: lines,
+            ..self.terminal_preferences.clone()
         };
         if let Err(error) = preferences.save() {
             self.appearance_notice = Some(error);
@@ -529,6 +557,20 @@ impl TerminalApp {
             if let Err(error) = session.set_scrollback_lines(lines, cx) {
                 self.appearance_notice = Some(error);
             }
+        }
+        cx.notify();
+    }
+
+    fn set_default_directory(&mut self, directory: Option<PathBuf>, cx: &mut Context<Self>) {
+        let preferences = terminal_preferences::TerminalPreferences {
+            default_directory: directory,
+            ..self.terminal_preferences.clone()
+        };
+        if let Err(error) = preferences.save() {
+            self.appearance_notice = Some(error);
+        } else {
+            self.terminal_preferences = preferences;
+            self.appearance_notice = None;
         }
         cx.notify();
     }
@@ -2227,18 +2269,27 @@ fn main_window_options(cx: &App) -> WindowOptions {
 }
 
 fn main() {
-    let directory = match std::env::args_os()
-        .nth(1)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")))
-        .canonicalize()
+    let explicit_directory = std::env::args_os().nth(1).map(PathBuf::from);
+    let explicit_directory = match explicit_directory
+        .map(|directory| directory.canonicalize())
+        .transpose()
     {
-        Ok(directory) if directory.is_dir() => directory,
-        _ => {
-            eprintln!("Pass an existing working directory as the first argument.");
+        Ok(directory) => directory,
+        Err(error) => {
+            eprintln!("Could not open the requested directory: {error}");
             std::process::exit(2);
         }
     };
+    let (terminal_preferences, terminal_notice) = terminal_preferences::TerminalPreferences::load();
+    let (directory, directory_notice) =
+        match terminal_preferences.startup_directory(explicit_directory.as_deref()) {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                eprintln!("Could not open the terminal directory: {error}");
+                std::process::exit(2);
+            }
+        };
+    let terminal_notice = terminal_notice.or(directory_notice);
     let application = Application::new().with_assets(ui::Icons);
     application.on_reopen(|cx| {
         if cx.windows().is_empty()
@@ -2275,6 +2326,7 @@ fn main() {
             KeyBinding::new("cmd-w", CloseWindow, None),
             KeyBinding::new("cmd-k", ClearTerminal, None),
             KeyBinding::new("enter", settings::ApplyScrollback, Some("ScrollbackInput")),
+            KeyBinding::new("enter", settings::ApplyDirectory, Some("DirectoryInput")),
             KeyBinding::new("escape", CloseWindow, Some("About")),
             KeyBinding::new("cmd-shift-w", CloseTab, None),
             KeyBinding::new("cmd-t", NewSession, None),
@@ -2306,7 +2358,9 @@ fn main() {
             KeyBinding::new(&format!("cmd-{}", index + 1), SelectTab { index }, None)
         }));
         match cx.open_window(main_window_options(cx), |window, cx| {
-            let terminal = cx.new(|cx| TerminalApp::new(directory, window, cx));
+            let terminal = cx.new(|cx| {
+                TerminalApp::new(directory, terminal_preferences, terminal_notice, window, cx)
+            });
             cx.set_global(ApplicationState {
                 terminal: terminal.clone(),
                 about_window: None,

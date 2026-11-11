@@ -11,7 +11,9 @@ pub struct ProcessIdentity {
     pub start_time_micros: u64,
 }
 
-pub use platform::{ExitWatch, identify_agent, is_alive, process_directory, shell_is_idle};
+pub use platform::{
+    ExitWatch, identify_agent, is_alive, process_directory, process_identity, shell_is_idle,
+};
 
 #[cfg(target_os = "macos")]
 mod platform {
@@ -89,6 +91,13 @@ mod platform {
             }
             _ => Err("process exited or its PID was reused".into()),
         }
+    }
+
+    pub fn process_identity(pid: u32) -> Result<ProcessIdentity, String> {
+        let info = process_info(pid)?
+            .filter(|info| info.pbi_status != libc::SZOMB && same_user(info))
+            .ok_or("process is unavailable or belongs to another user")?;
+        Ok(identity_of(&info))
     }
 
     fn same_user(info: &libc::proc_bsdinfo) -> bool {
@@ -852,6 +861,7 @@ mod platform {
             let directory = TestDirectory::new();
             let mut process = TestProcess::sleep(&directory.0);
             let identity = process.identity();
+            assert_eq!(process_identity(identity.pid).unwrap(), identity);
             assert_eq!(is_alive(&identity), Ok(true));
             assert_eq!(process_directory(&identity).unwrap(), directory.0);
             let reused = ProcessIdentity {
@@ -1018,6 +1028,10 @@ mod platform {
     }
 
     pub fn process_directory(_identity: &ProcessIdentity) -> Result<PathBuf, String> {
+        Err(UNSUPPORTED.into())
+    }
+
+    pub fn process_identity(_pid: u32) -> Result<ProcessIdentity, String> {
         Err(UNSUPPORTED.into())
     }
 

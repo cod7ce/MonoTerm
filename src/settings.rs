@@ -15,7 +15,7 @@ use gpui::{
 };
 use std::collections::HashMap;
 
-actions!(settings, [CloseSettings, ApplyScrollback]);
+actions!(settings, [CloseSettings, ApplyScrollback, ApplyDirectory]);
 
 /// Only preferences belong here: terminal output must not redraw Settings.
 #[derive(Clone, PartialEq)]
@@ -25,6 +25,7 @@ pub(crate) struct SettingsSnapshot {
     font_size: f32,
     font_family: String,
     scrollback_lines: usize,
+    default_directory: String,
     language: Language,
     sidebar: bool,
     zen: bool,
@@ -42,6 +43,12 @@ impl From<&TerminalApp> for SettingsSnapshot {
             font_size: root.font_size,
             font_family: root.typography.font_family.clone(),
             scrollback_lines: root.terminal_preferences.scrollback_lines,
+            default_directory: root
+                .terminal_preferences
+                .default_directory
+                .as_ref()
+                .map(|directory| directory.to_string_lossy().into_owned())
+                .unwrap_or_default(),
             language: root.language,
             sidebar: root.sidebar,
             zen: root.zen,
@@ -65,6 +72,8 @@ enum Category {
 
 #[derive(Clone)]
 enum Change {
+    ApplyDirectory,
+    DefaultDirectory(Option<std::path::PathBuf>),
     ApplyScrollback,
     Scrollback(usize),
     Language(Language),
@@ -137,6 +146,7 @@ pub(crate) struct SettingsWindow {
     local_feedback: Option<String>,
     font_search: Entity<TextInput>,
     scrollback_input: Entity<TextInput>,
+    directory_input: Entity<TextInput>,
     font_query: String,
     show_all_fonts: bool,
     filtered_fonts: Vec<usize>,
@@ -164,6 +174,11 @@ impl SettingsWindow {
         let observation = cx.observe(&owner, |settings, entity, cx| {
             let snapshot = SettingsSnapshot::from(entity.read(cx));
             if settings.snapshot != snapshot {
+                if settings.snapshot.default_directory != snapshot.default_directory {
+                    settings.directory_input.update(cx, |input, cx| {
+                        input.set_value(snapshot.default_directory.clone(), cx);
+                    });
+                }
                 if settings.snapshot.scrollback_lines != snapshot.scrollback_lines {
                     settings.scrollback_input.update(cx, |input, cx| {
                         input.set_value(snapshot.scrollback_lines.to_string(), cx);
@@ -191,6 +206,8 @@ impl SettingsWindow {
         let updater_observation = cx.observe(&updater, |_, _, cx| cx.notify());
         let scrollback_input =
             cx.new(|cx| TextInput::new(snapshot.scrollback_lines.to_string(), "10000".into(), cx));
+        let directory_input =
+            cx.new(|cx| TextInput::new(snapshot.default_directory.clone(), "~/".into(), cx));
         let font_search = cx.new(|cx| {
             TextInput::new(
                 String::new(),
@@ -221,6 +238,7 @@ impl SettingsWindow {
             local_feedback: None,
             font_search,
             scrollback_input,
+            directory_input,
             font_query: String::new(),
             show_all_fonts: false,
             filtered_fonts: filter_fonts(installed_fonts(), "", false),
@@ -255,7 +273,20 @@ impl SettingsWindow {
 
     fn change(&mut self, change: Change, cx: &mut Context<Self>) {
         self.local_feedback = None;
-        let change = if matches!(change, Change::ApplyScrollback) {
+        let change = if matches!(change, Change::ApplyDirectory) {
+            let input = self.directory_input.read(cx);
+            if input.has_marked_text() {
+                return;
+            }
+            match crate::terminal_preferences::parse_default_directory(input.value()) {
+                Ok(directory) => Change::DefaultDirectory(directory),
+                Err(error) => {
+                    self.local_feedback = Some(error);
+                    cx.notify();
+                    return;
+                }
+            }
+        } else if matches!(change, Change::ApplyScrollback) {
             let input = self.scrollback_input.read(cx);
             if input.has_marked_text() {
                 return;
@@ -298,6 +329,10 @@ impl SettingsWindow {
                               terminal_window: &mut Window,
                               cx: &mut Context<TerminalApp>| {
                 match change {
+                    Change::DefaultDirectory(directory) => {
+                        root.set_default_directory(directory, cx);
+                        return;
+                    }
                     Change::Scrollback(lines) => {
                         root.set_scrollback_lines(lines, cx);
                         return;
@@ -1217,7 +1252,20 @@ impl SettingsWindow {
             .flex()
             .flex_col()
             .gap(px(16.0))
-            .child(self.heading("Terminal", "Terminal history and text appearance."))
+            .child(self.heading("Terminal", "Startup directory, terminal history and text appearance."))
+            .child(
+                self.card()
+                    .child(self.row(64.0, false)
+                        .child(self.row_label("Default working directory", "Leave blank to open your home directory.")))
+                    .child(div().px(px(16.0)).pb(px(12.0)).flex().items_center().gap(px(12.0))
+                        .child(div()
+                            .key_context("DirectoryInput")
+                            .flex_1().min_w_0().px(px(8.0)).rounded(px(6.0))
+                            .border_1().border_color(rgb(p.border))
+                            .child(self.directory_input.clone()))
+                        .child(self.text_button("apply-directory", "Apply", Change::ApplyDirectory, cx))),
+            )
+            .child(self.description("New tabs use the default directory. New panes follow the active shell's current directory. Changing this setting does not move existing shells."))
             .child(
                 self.card().child(
                     self.row(72.0, false)
@@ -1786,6 +1834,9 @@ impl Render for SettingsWindow {
             )
             .on_action(cx.listener(|settings, _: &ApplyScrollback, _, cx| {
                 settings.change(Change::ApplyScrollback, cx);
+            }))
+            .on_action(cx.listener(|settings, _: &ApplyDirectory, _, cx| {
+                settings.change(Change::ApplyDirectory, cx);
             }))
             .on_action(
                 cx.listener(|settings, _: &CloseWindow, window, cx| settings.close(window, cx)),

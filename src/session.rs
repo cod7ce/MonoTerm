@@ -73,6 +73,13 @@ impl Session {
         Ok(())
     }
 
+    pub fn current_directory(&self) -> Option<PathBuf> {
+        self.process
+            .as_ref()
+            .and_then(|process| process.current_directory().ok())
+            .or_else(|| crate::terminal_preferences::existing_directory(&self.directory).ok())
+    }
+
     pub fn set_font(&mut self, font: Font, cx: &mut App) {
         if self.font == font {
             return;
